@@ -73,6 +73,11 @@ go run . --web 127.0.0.1:8080
 The rest of this README uses `go run .`; with an installed binary, run `go-redis-road-test` with the
 same flags.
 
+**Release binaries.** `scripts/release.sh v0.1.0` builds Linux (amd64, arm64) and macOS (arm64,
+amd64) binaries into `dist/`, one `.tar.gz` each with a `SHA256SUMS` file. With `--publish` it also
+creates a signed tag, pushes it and creates the GitHub release with those files. A machine without
+Go can then download one and run it.
+
 ## 1. Redis
 
 The demo connects to `localhost:6379` by default. Point it at any Redis you like: with flags, or in
