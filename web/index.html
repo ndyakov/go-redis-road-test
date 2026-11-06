@@ -1,0 +1,814 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>go-redis engines</title>
+<style>
+  :root {
+    --midnight: #091a23; --dusk: #163341; --panel: #0f2530; --line: #1e3542; --text: #e8f0f4;
+    --muted: #96a6b0; --hyper: #ff4438; --sky: #80dbff; --lime: #dcff1e; --purple: #c795e3;
+    --font: "Space Grotesk", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --mono: "Space Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--midnight); color: var(--text); font-family: var(--font); }
+  header { display: flex; align-items: baseline; gap: 18px; padding: 10px 24px; border-bottom: 1px solid var(--line); }
+  header h1 { margin: 0; font-size: 26px; font-weight: 700; letter-spacing: -0.01em; }
+  header h1 span { color: var(--hyper); }
+  header .meta { color: var(--muted); font-size: 15px; }
+  header .status { margin-left: auto; font-size: 14px; color: var(--muted); }
+  header .status b { color: var(--lime); }
+  main { padding: 10px 24px 24px; display: grid; gap: 10px; grid-template-columns: 1fr; }
+  .stage { display: grid; grid-template-columns: 1.3fr 1.1fr 1fr; gap: 10px; }
+  .kpis { display: grid; grid-template-columns: 3fr 2fr; gap: 10px; } /* the chart columns: see .charts */
+  .kpis-left { display: grid; grid-template-columns: 2fr 2fr 1fr 1fr; gap: 10px; } /* requests, p99, connections, errors */
+  .kpis-left > * { grid-column: auto !important; }
+  .kpis .kpi .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .split { display: grid; grid-template-columns: 3fr 2fr; gap: 10px; }
+  .bottom { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .charts { display: grid; grid-template-columns: 3fr 2fr; gap: 10px; } /* throughput | blocked, latency | scoreboard */
+  .charts #t-blocked { padding: 14px 18px; }
+  .charts #t-blocked .lines { line-height: 1.7; font-size: 14px; margin-top: 4px; }
+  .split > *, .bottom > *, .kpis > *, .charts > * { grid-column: auto !important; }
+  details.drawer { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 8px 16px; }
+  details.drawer[open] { padding-bottom: 14px; }
+  details.drawer > summary { cursor: pointer; font-size: 15px; font-weight: 600; padding: 4px 0; list-style: none; }
+  details.drawer > summary::-webkit-details-marker { display: none; }
+  details.drawer > summary::before { content: "▸"; display: inline-block; width: 18px; color: var(--muted); }
+  details.drawer[open] > summary::before { content: "▾"; }
+  details.drawer > summary .sum { color: var(--muted); font-weight: 400; margin-left: 10px; }
+  details.drawer > section { margin-top: 10px; }
+  details.drawer .experiments, details.drawer .conn { background: none; border: none; padding: 0; }
+  details.drawer .otel { background: none; border: none; border-top: 1px solid var(--line); border-radius: 0; padding: 14px 0 0; margin-top: 14px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 14px 18px; }
+  .controls { display: grid; grid-template-columns: 1fr 1.3fr; gap: 12px; padding: 0; background: none; border: none; }
+  .cpanel { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 10px 16px; display: grid;
+            grid-template-columns: 96px 1fr; row-gap: 7px; column-gap: 10px; align-items: center; align-content: start; }
+  .cpanel h3 { grid-column: 1 / -1; margin: 0 0 2px; font-size: 15px; font-weight: 600; display: flex; gap: 10px; align-items: baseline; }
+  .cpanel h3 .sum { color: var(--muted); font-weight: 400; font-size: 13px; }
+  .cpanel h3 .status { margin-left: auto; color: var(--muted); font-weight: 400; font-size: 13px; text-align: right; }
+  .cpanel h3 .status b { color: var(--lime); }
+  details.code-drawer > summary { cursor: pointer; color: var(--muted); font-size: 13px; list-style: none; }
+  details.code-drawer > summary::-webkit-details-marker { display: none; }
+  details.code-drawer > summary::before { content: "▸ "; }
+  details.code-drawer[open] > summary::before { content: "▾ "; }
+  details.code-drawer code { margin-top: 6px; }
+  .slider { display: flex; align-items: center; gap: 10px; }
+  .slider input[type=range] { flex: 1; accent-color: var(--lime); min-width: 120px; }
+  .slider output { min-width: 86px; text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+  .hidden { display: none !important; }
+  .experiments { grid-column: 1 / -1; display: grid; grid-template-columns: 1.3fr 1fr 1fr 1.4fr; gap: 18px; }
+  .experiments .grp { display: grid; gap: 8px; align-content: start; }
+  .experiments h3 { margin: 0; font-size: 15px; font-weight: 600; }
+  .conn { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; padding: 10px 18px; }
+  .conn label { color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; }
+  .conn input { font-family: var(--mono); font-size: 14px; color: var(--text); background: var(--midnight);
+                border: 1px solid var(--line); border-radius: 8px; padding: 6px 9px; }
+  .conn input:focus { outline: none; border-color: var(--lime); }
+  .conn .ok { color: var(--lime); } .conn .bad { color: var(--hyper); }
+  .full { grid-column: 1 / -1; }
+  .cpanel .label { color: var(--muted); font-size: 14px; text-transform: uppercase; letter-spacing: 0.08em; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  button { font-family: var(--font); font-size: 15px; color: var(--text); background: var(--dusk); border: 1px solid var(--line);
+           border-radius: 9px; padding: 7px 14px; cursor: pointer; }
+  button:hover { border-color: var(--muted); }
+  button.on { color: var(--midnight); font-weight: 700; }
+  button:disabled { opacity: 0.35; cursor: default; }
+  button .k { font-family: var(--mono); font-size: 12px; opacity: 0.7; margin-right: 6px; }
+  .hint { color: var(--muted); font-size: 14px; margin-left: 10px; }
+  code.start { display: block; font-family: var(--mono); font-size: 13px; padding: 6px 10px; background: var(--midnight);
+               border: 1px solid var(--line); border-radius: 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .kpi .name { color: var(--muted); font-size: 14px; }
+  .kpi .value { font-size: 30px; font-weight: 700; margin: 2px 0 1px; font-variant-numeric: tabular-nums; }
+  .kpi .note { color: var(--muted); font-size: 13px; }
+  .kpi.warming .value { color: var(--muted); }
+  .kpis .kpi { padding: 8px 14px; cursor: default; }
+  .kpis .kpi .name { font-size: 13px; }
+  .kpis .kpi .value { font-size: 24px; margin: 1px 0 0; }
+  .kpis .kpi .note, .kpis .kpi .lines { display: none; }
+  .kpis #k-lat .note { display: block; }
+  .kpis #t-delayed { display: grid; grid-template-columns: auto 1fr; column-gap: 16px; align-content: start; }
+  .kpis #t-delayed .name, .kpis #t-delayed .value, .kpis #t-delayed .lagwarn { grid-column: 1; }
+  .kpis #t-delayed #t-slow { grid-column: 2; grid-row: 1 / span 2; justify-content: flex-end; align-self: center; }
+  .kpis #t-delayed #t-slow button { padding: 4px 10px; font-size: 13px; }
+  .trouble { grid-column: span 2; padding-top: 10px; padding-bottom: 10px; }
+  .trouble .value { font-size: 26px; margin: 2px 0; }
+  .trouble.narrow { grid-column: span 1; }
+  .trouble .value.bad { color: var(--hyper); }
+  .trouble .lines { color: var(--muted); font-size: 13px; line-height: 1.55; font-variant-numeric: tabular-nums; }
+  .trouble .lines b { color: var(--text); font-weight: 600; }
+  .trouble .err { overflow-wrap: anywhere; }
+  .chart { grid-column: 1 / -1; }
+  .chart h2, .board h2, .events h2 { margin: 0 0 8px; font-size: 16px; font-weight: 600; }
+  .chart h2 .sub, .board h2 .sub { color: var(--muted); font-weight: 400; margin-left: 10px; }
+  .info { display: inline-flex; align-items: center; justify-content: center; width: 17px; height: 17px; margin-left: 8px;
+          border: 1px solid var(--muted); border-radius: 50%; color: var(--muted); font-size: 11px; font-weight: 700;
+          font-style: italic; cursor: help; vertical-align: 1px; }
+  .info:hover { color: var(--text); border-color: var(--text); }
+  canvas { width: 100%; display: block; }
+  .legend { display: flex; gap: 18px; flex-wrap: wrap; color: var(--muted); font-size: 13px; margin-top: 6px; }
+  .legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
+  .events { grid-column: 1 / -1; }
+  details.drawer .finder { background: none; border: none; border-top: 1px solid var(--line); border-radius: 0; padding: 14px 0 0; margin-top: 14px; }
+  .finder h2 { margin: 0 0 6px; font-size: 16px; font-weight: 600; display: flex; gap: 12px; align-items: center; }
+  .finder .hint { margin: 0 0 6px; }
+  .frow { display: grid; grid-template-columns: 260px 90px 90px 90px 120px 90px 70px 70px 1fr; gap: 8px; font-size: 14px;
+          font-variant-numeric: tabular-nums; padding: 3px 0; align-items: center; }
+  .frow.head { color: var(--muted); font-size: 12px; }
+  .frow .num { text-align: right; }
+  .frow.out { opacity: 0.45; }
+  .frow .tags { color: var(--lime); font-weight: 600; font-size: 13px; }
+  .lagwarn { color: var(--hyper); font-size: 13px; font-weight: 600; }
+  .orderline { font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .fcheck { color: var(--muted); font-size: 13px; font-weight: 400; display: inline-flex; gap: 6px; align-items: center; cursor: pointer; }
+  .fcheck input { accent-color: var(--lime); }
+  .otel { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1.1fr; gap: 8px 28px; }
+  .otel h2 { margin: 0; font-size: 16px; font-weight: 600; display: flex; gap: 12px; align-items: center; }
+  .otel .hint { margin: 0; }
+  .orow { display: grid; grid-template-columns: 110px 100px 90px 90px 90px 1fr; gap: 8px; font-variant-numeric: tabular-nums; font-size: 14px; padding: 2px 0; }
+  .orow.head { color: var(--muted); font-size: 12px; }
+  .orow .num { text-align: right; }
+  .otel .lines { color: var(--muted); font-size: 13px; line-height: 1.6; font-variant-numeric: tabular-nums; }
+  .otel .lines b { color: var(--text); font-weight: 600; }
+  .brow { display: grid; grid-template-columns: 160px 1fr 58px 100px 72px 44px 26px; gap: 8px; align-items: center;
+          padding: 5px 0; font-variant-numeric: tabular-nums; font-size: 15px; }
+  .brow .bar { height: 16px; border-radius: 4px; }
+  .brow .num { text-align: right; }
+  .brow .tag { color: var(--lime); font-weight: 700; }
+  .brow .bname { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .brow.failed { opacity: 0.5; }
+  .charts .board { display: flex; flex-direction: column; min-height: 0; }
+  .board-rest-wrap { position: relative; flex: 1; min-height: 40px; border-top: 1px solid var(--line); margin-top: 4px; }
+  #board-rest { position: absolute; inset: 0; overflow-y: auto; } /* out of the flow: it never grows the panel */
+  .events ul { margin: 0; padding: 0; list-style: none; font-family: var(--mono); font-size: 13px; color: var(--muted); }
+  .events li { padding: 3px 0; }
+  .err { color: var(--hyper); }
+  footer { color: var(--muted); font-size: 13px; padding: 0 28px 20px; }
+  footer kbd { font-family: var(--mono); background: var(--dusk); border: 1px solid var(--line); border-radius: 5px; padding: 1px 6px; }
+</style>
+</head>
+<body>
+<main>
+  <section class="stage">
+    <div class="cpanel">
+      <h3>Engine <span class="sum" id="meta"></span></h3>
+      <div class="row full" id="engines"></div>
+      <details class="code-drawer full" id="d-code"><summary>constructor</summary><code class="start" id="code"></code></details>
+    </div>
+    <div class="cpanel">
+      <h3>Road and load <span class="status" id="status">connecting...</span></h3>
+      <div class="label">RTT</div><div class="slider" id="s-rtt"></div>
+      <div class="hint full road-hint" id="road-hint" style="margin:0"></div>
+      <div class="label">Callers</div><div class="slider" id="s-callers"></div>
+      <div class="label">In flight</div><div class="slider" id="s-window"></div>
+      <div class="hint full" id="window-hint" style="margin:0"></div>
+    </div>
+    <div class="cpanel">
+      <h3>Workload</h3>
+      <div class="row full" id="workloads"></div>
+      <div class="hint full" id="workload-note" style="margin:0"></div>
+    </div>
+  </section>
+  <details class="drawer" id="d-options">
+    <summary>Options <span class="sum">workload and engine settings</span></summary>
+  <section class="controls">
+    <div class="cpanel">
+      <h3>Workload options</h3>
+      <div class="label" data-for="mix">Writes</div><div class="slider" id="s-writePct" data-for="mix"></div>
+      <div class="label" data-for="get mix">GET</div><div class="row" id="t-zeroCopy" data-for="get mix"></div>
+      <div class="label">Value size</div><div class="slider" id="s-valueSize"></div>
+      <div class="hint full" id="size-hint" style="margin:0"></div>
+      <div class="label" data-for="page">Keys per page</div><div class="slider" id="s-fanOut" data-for="page"></div>
+      <div class="label" data-for="page">App work</div><div class="slider" id="s-workUs" data-for="page"></div>
+    </div>
+    <div class="cpanel">
+      <h3>Engine options</h3>
+      <div class="label" data-eng="0">PoolSize</div><div class="slider" id="s-poolSize" data-eng="0"></div>
+      <div class="label" data-eng="0">Warm conns</div><div class="slider" id="s-minIdleConns" data-eng="0"></div>
+      <div class="label" data-eng="0">Buffers</div><div class="slider" id="s-bufferKiB" data-eng="0"></div>
+      <div class="label" data-eng="0">Max active</div><div class="slider" id="s-maxActiveConns" data-eng="0"></div>
+      <div class="label" data-eng="1 2">Batch size</div><div class="slider" id="s-maxBatchSize" data-eng="1 2"></div>
+      <div class="label" data-eng="1 2">Batch bytes</div><div class="slider" id="s-maxBatchKiB" data-eng="1 2"></div>
+      <div class="label" data-eng="1">Connections</div><div class="slider" id="s-batchShards" data-eng="1"></div>
+      <div class="label" data-eng="1 2">At once</div><div class="slider" id="s-maxConcurrentBatches" data-eng="1 2"></div>
+      <div class="label" data-eng="1 2">Queue limit</div><div class="slider" id="s-maxQueued" data-eng="1 2"></div>
+      <div class="label" data-eng="3 4">Pipes</div><div class="slider" id="s-numShards" data-eng="3 4"></div>
+      <div class="label" data-eng="3 4">Window</div><div class="slider" id="s-fdWindow" data-eng="3 4"></div>
+      <div class="label" data-eng="3 4">Flush delay</div><div class="slider" id="s-maxFlushDelayUs" data-eng="3 4"></div>
+      <div class="label" data-eng="1 2 3 4">Buffers</div><div class="slider" id="s-pipeBufKiB" data-eng="1 2 3 4"></div>
+      <div class="hint full" id="opt-hint" style="margin:0"></div>
+    </div>
+    <div class="cpanel hidden" id="client-options"><!-- hidden for the demo; remove "hidden" to show it -->
+      <h3>Client options <span class="info" title="redis.Options for every engine, and the Go GC of this process. The finder keeps them as set.">i</span></h3>
+      <div class="label">Protocol</div><div class="row" id="t-resp2"></div>
+      <div class="label">Pool timeout</div><div class="slider" id="s-poolTimeoutMs"></div>
+      <div class="label">Retries</div><div class="slider" id="s-maxRetries"></div>
+      <div class="label">Timeouts</div><div class="slider" id="s-timeoutMs"></div>
+      <div class="label">Conn lifetime</div><div class="slider" id="s-connLifetimeMs"></div>
+      <div class="label">Identity</div><div class="row" id="t-disableIdentity"></div>
+      <div class="label">GOGC</div><div class="slider" id="s-gogc"></div>
+    </div>
+  </section>
+  </details>
+
+  <div class="kpis">
+  <div class="kpis-left">
+  <section class="panel kpi" id="k-rate"><div class="name">requests/s, client</div><div class="value">-</div><div class="note">higher is better</div></section>
+  <section class="panel kpi" id="k-lat"><div class="name">p99 latency</div><div class="value">-</div><div class="note" id="k-p50">lower is better</div></section>
+  <section class="panel kpi" id="k-conns"><div class="name">connections</div><div class="value">-</div><div class="note">from CLIENT LIST, lower is better</div></section>
+  <section class="panel kpi trouble" id="t-errors"><div class="name">errors</div><div class="value">-</div><div class="lines"></div><div class="orderline" id="t-order"></div></section>
+  </div>
+  <section class="panel kpi trouble wide" id="t-delayed"><div class="name">delayed</div><div class="value">-</div><div class="lines"></div><div class="lagwarn" id="t-lag"></div><div class="row" id="t-slow"></div></section>
+  </div>
+
+  <div class="charts">
+  <section class="panel chart">
+    <h2>Throughput, requests/s<span class="sub">higher is better</span><span class="info" title="One column per 500 ms. Colour = engine, grey = warm-up, letters = changes, red mark = errors.">i</span></h2>
+    <canvas id="tp" height="300"></canvas>
+    <div class="legend" id="legend"></div>
+  </section>
+  <section class="panel kpi trouble" id="t-blocked"><div class="name">blocked in the client</div><div class="value">-</div><div class="lines"></div></section>
+  <section class="panel chart lat">
+    <h2>Latency<span class="sub">lower is better</span><span class="info" title="Bars = p99, white line = p50, dashed = one round trip. Log scale.">i</span></h2>
+    <canvas id="lat" height="230"></canvas>
+  </section>
+  <section class="panel board">
+    <h2>Scoreboard<span class="info" id="board-sub" title="">i</span></h2>
+    <div id="board"></div>
+    <div class="board-rest-wrap"><div id="board-rest"></div></div>
+  </section>
+  </div>
+
+  <details class="drawer" id="d-experiments">
+    <summary>Experiments <span class="sum">find the best setup, open loop, client cores, faults, go-redis OpenTelemetry</span></summary>
+  <section class="panel experiments">
+    <div class="grp">
+      <h3>Load</h3>
+      <div class="row" id="x-loop"></div>
+      <div class="slider" id="s-openRate"></div>
+      <div class="hint" style="margin:0" id="x-loop-hint"></div>
+    </div>
+    <div class="grp">
+      <h3>Client cores</h3>
+      <div class="slider" id="s-cores"></div>
+      <div class="hint" style="margin:0">GOMAXPROCS: a small client is where MaxFlushDelay pays off</div>
+    </div>
+    <div class="grp">
+      <h3>Faults</h3>
+      <div class="row" id="x-faults"></div>
+      <div class="hint" style="margin:0" id="x-fault-status">inject one while the load runs, then watch the charts</div>
+    </div>
+  </section>
+  <section class="panel finder">
+    <h2>Find the best setup <span class="row" id="f-btn"></span><label class="fcheck" title="The async faces always run with one request in flight per caller (its commands still go out together). Checked, they also keep 2, 4 and 8 requests in flight per caller: your app must be able to send them without waiting for each reply."><input type="checkbox" id="f-async"> more in flight per caller (2, 4, 8)</label><span class="info" title="Runs every engine and its main mechanisms (in flight on the async faces, pipes on full duplex, connections on blocking batching) on the current road, workload, callers or open-loop rate, 4 s each after warm-up, then names the best. A setup with errors, or behind schedule in open loop, cannot win. The finder takes over the engine, in flight, pipes and batching connections while it runs and puts them back.">i</span></h2>
+    <div class="hint" id="f-status"></div>
+    <div id="f-results"></div>
+  </section>
+  <section class="panel otel">
+    <h2>go-redis OpenTelemetry <span class="row" id="o-toggle"></span></h2>
+    <div class="hint" id="o-hint"></div>
+    <div id="o-ops"></div>
+    <div class="lines" id="o-lines"></div>
+  </section>
+  </details>
+
+  <div class="bottom">
+  <section class="panel kpi" id="k-server"><div class="name">commands/s seen by Redis</div><div class="value">-</div><div class="note" id="k-server-note">from INFO commandstats</div></section>
+  <section class="panel kpi" id="k-cpu"><div class="name">client CPU</div><div class="value">-</div><div class="note">this process: client and road proxy</div></section>
+  </div>
+
+  <details class="drawer" id="d-conn">
+    <summary>Connection <span class="sum" id="conn-sum"></span></summary>
+  <section class="panel conn">
+    <label for="c-host">Redis</label><input id="c-host" size="18" placeholder="localhost" autocomplete="off">
+    <label for="c-port">Port</label><input id="c-port" size="6" placeholder="6379" inputmode="numeric">
+    <label for="c-user">User</label><input id="c-user" size="12" placeholder="(none)" autocomplete="off">
+    <label for="c-pass">Password</label><input id="c-pass" size="14" type="password" placeholder="(none)" autocomplete="off">
+    <button id="c-go">Connect</button>
+    <span id="c-status" class="hint"></span>
+  </section>
+  </details>
+  <section class="panel events">
+    <h2>Events</h2>
+    <ul id="events"></ul>
+  </section>
+</main>
+<footer>
+  Keys: <kbd>1</kbd>-<kbd>5</kbd> engine &middot; <kbd>r</kbd> road &middot; <kbd>+</kbd> <kbd>-</kbd> callers &middot;
+  <kbd>w</kbd> in flight (async) &middot; <kbd>x</kbd> clear scoreboard
+</footer>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const WARM = "#465864", GRID = "#1e3542", MUTED = "#96a6b0", TEXT = "#e8f0f4", LIME = "#dcff1e";
+let S = null;
+
+function fmtRate(v) {
+  if (v == null || v < 0) return "-";
+  if (v >= 1e6) return (v / 1e6).toFixed(2) + "M";
+  if (v >= 1e3) return Math.round(v / 1e3) + "k";
+  return Math.round(v).toString();
+}
+// fmtCount is a count: exact below 1,000, then a floor ("> 12K", "> 1.6M").
+function fmtCount(n) {
+  if (n < 1000) return String(n);
+  if (n < 1e6) return `> ${Math.floor(n / 1000)}K`;
+  return `> ${(Math.floor(n / 1e5) / 10).toFixed(1)}M`;
+}
+
+// fmtWhole is a whole number of ms as "100 ms" or "2 s", for settings.
+function fmtWhole(v) { return v >= 1000 ? `${v / 1000} s` : `${v} ms`; }
+
+function fmtMs(v) {
+  if (v == null || v <= 0) return "-";
+  if (v < 1) return Math.round(v * 1000) + " µs";
+  if (v < 10) return v.toFixed(2) + " ms";
+  if (v < 1000) return v.toFixed(1) + " ms";
+  return (v / 1000).toFixed(v < 10000 ? 2 : 1) + " s";
+}
+function niceUp(v) {
+  if (v <= 0) return 1;
+  const p = Math.pow(10, Math.floor(Math.log10(v)));
+  for (const m of [1, 2, 2.5, 5, 10]) if (m * p >= v) return m * p;
+  return 10 * p;
+}
+function post(path) { fetch(path, { method: "POST" }).catch(() => {}); }
+
+function button(label, key, on, color, onclick, disabled) {
+  const b = document.createElement("button");
+  b.innerHTML = (key ? `<span class="k">${key}</span>` : "") + label;
+  if (on) { b.classList.add("on"); b.style.background = color || LIME; b.style.borderColor = color || LIME; }
+  else if (color) { b.style.color = color; }
+  b.disabled = !!disabled;
+  b.onclick = onclick;
+  return b;
+}
+// fill replaces a container's children; with a key, only when the key changed,
+// so a row of buttons is not rebuilt (and does not flicker) on every update
+function fill(el, nodes, key) {
+  if (key !== undefined && el._key === key) return false;
+  el._key = key;
+  el.replaceChildren(...nodes);
+  return true;
+}
+
+// Sliders over a list of values. Built once; each update only syncs values,
+// and never the one you are dragging.
+const pow2 = (from, to) => { const v = []; for (let x = from; x <= to; x *= 2) v.push(x); return v; };
+const fmtBytes = (v) => v >= 1 << 20 ? `${v / (1 << 20)} MiB` : v >= 1024 ? `${v / 1024} KiB` : `${v} B`;
+const SLIDERS = {
+  rtt: { vals: Array.from({ length: 81 }, (_, i) => i * 250), fmt: (v) => v === 0 ? "+0" : `+${v / 1000} ms`,
+         get: () => Math.round(S.rttMs * 1000), set: (v) => post(`/api/rttus/${v}`) },
+  callers: { vals: pow2(1, 4096), fmt: (v) => `${v}`, get: () => S.callers, set: (v) => post(`/api/callers/${v}`) },
+  window: { vals: pow2(1, 256), fmt: (v) => `${v} per caller`, get: () => S.window, set: (v) => post(`/api/window/${v}`) },
+  writePct: { vals: Array.from({ length: 21 }, (_, i) => i * 5), fmt: (v) => `${v}% SET`, cfg: true },
+  valueSize: { vals: pow2(16, 1 << 20), fmt: fmtBytes, cfg: true },
+  fanOut: { vals: [1, 2, 5, 10, 20, 50], fmt: (v) => `${v} GETs`, cfg: true },
+  workUs: { vals: [0, 100, 250, 500, 1000, 2000, 5000, 10000, 20000], fmt: (v) => v === 0 ? "none" : v < 1000 ? `${v} µs` : `${v / 1000} ms`, cfg: true },
+  poolSize: { vals: [1, 2, 5, 10, 20, 50, 100, 250, 500, 1000, 2000], fmt: (v) => `${v}`, cfg: true },
+  minIdleConns: { vals: [0, 10, 50, 100, 250, 500, 1000, 2000], fmt: (v) => v === 0 ? "none (default)" : `${v} dialed ahead`, cfg: true },
+  bufferKiB: { vals: [0, 4, 16, 64, 256, 1024], fmt: (v) => v === 0 ? "default (32 KiB)" : `${fmtBytes(v * 1024)} each way`, cfg: true },
+  maxBatchSize: { vals: [0, 10, 50, 100, 300, 1000, 5000, 20000], fmt: (v) => v === 0 ? "default (200; 300 blocking)" : `${v} commands`, cfg: true },
+  maxBatchKiB: { vals: [0, 64, 128, 1024, 4096, 16384, 65536], fmt: (v) => v === 0 ? "default (128 KiB)" : fmtBytes(v * 1024), cfg: true },
+  batchShards: { vals: [1, 2, 3, 4, 6, 8, 12, 16], fmt: (v) => `${v}${v === 1 ? " (default)" : ""}`, cfg: true },
+  maxConcurrentBatches: { vals: [1, 2, 4, 8, 16], fmt: (v) => v === 1 ? "1 (ordered, default)" : `${v}, unordered`, cfg: true },
+  maxQueued: { vals: [0, 1000, 10000, 100000, 1000000], fmt: (v) => v === 0 ? "no limit (default)" : `${v.toLocaleString("en")} commands`, cfg: true },
+  pipeBufKiB: { vals: [0, 16, 64, 256, 1024, 4096], fmt: (v) => v === 0 ? "default (128 KiB)" : `${fmtBytes(v * 1024)} each way`, cfg: true },
+  numShards: { vals: [1, 2, 3, 4, 6, 8, 12, 16], fmt: (v) => `${v} (${v} conn${v === 1 ? "" : "s"})`, cfg: true },
+  maxFlushDelayUs: { vals: [0, 25, 50, 100, 250, 500, 1000, 2000], fmt: (v) => v === 0 ? "off (default)" : `${v} µs`, cfg: true },
+  poolTimeoutMs: { vals: [0, 10, 100, 1000, 5000], fmt: (v) => v === 0 ? "default (30 s)" : fmtWhole(v), cfg: true },
+  maxRetries: { vals: [-1, 0, 1, 10], fmt: (v) => v === -1 ? "none" : (v === 0 ? "default (3)" : `${v}`), cfg: true },
+  timeoutMs: { vals: [0, 50, 200, 1000, 3000], fmt: (v) => v === 0 ? "default (10 s)" : fmtWhole(v), cfg: true },
+  connLifetimeMs: { vals: [0, 500, 2000, 10000, 60000], fmt: (v) => v === 0 ? "no limit (default)" : fmtWhole(v), cfg: true },
+  gogc: { vals: [25, 50, 0, 200, 400, 800], fmt: (v) => v === 0 ? "default (100)" : `${v}`, cfg: true },
+  fdWindow: { vals: [0, 16, 64, 256, 1024, 4096, 16384, 65536, 262144], fmt: (v) => v === 0 ? "default (65,536)" : `${v.toLocaleString("en")} per pipe`, cfg: true },
+  openRate: { vals: [0, 1000, 5000, 10000, 25000, 50000, 100000, 250000, 500000, 1000000, 2000000],
+              fmt: (v) => v === 0 ? "closed loop" : `${fmtRate(v)}/s target`, cfg: true },
+  maxActiveConns: { vals: [0, 1, 10, 50, 100, 250, 500, 1000, 2000], fmt: (v) => v === 0 ? "no limit (default)" : `${v} at most`, cfg: true },
+};
+let built = false;
+function nearest(vals, v) { let best = 0; vals.forEach((x, i) => { if (Math.abs(x - v) < Math.abs(vals[best] - v)) best = i; }); return best; }
+function buildControls() {
+  const cores = [...new Set([1, 2, 4, 6, 8, 12, 16, S.road.coresMax].filter((n) => n <= S.road.coresMax))].sort((a, b) => a - b);
+  SLIDERS.cores = { vals: cores, fmt: (v) => v === S.road.coresMax ? `${v} (all)` : `${v} of ${S.road.coresMax}`,
+                    get: () => S.road.cores, set: (v) => post(`/api/cores/${v}`) };
+  for (const [name, sp] of Object.entries(SLIDERS)) {
+    const host = $("s-" + name), input = document.createElement("input"), out = document.createElement("output");
+    input.type = "range"; input.min = 0; input.max = sp.vals.length - 1; input.step = 1;
+    input.oninput = () => { out.textContent = sp.fmt(sp.vals[input.value]); };
+    input.onchange = () => {
+      const v = sp.vals[input.value];
+      if (sp.cfg) fetch("/api/config", { method: "POST", body: JSON.stringify({ [name]: v }) }).catch(() => {});
+      else sp.set(v);
+    };
+    input.onpointerdown = () => { input._held = true; };
+    input.onpointerup = () => { input._held = false; };
+    host.replaceChildren(input, out);
+    sp.input = input; sp.out = out;
+  }
+  built = true;
+}
+function renderControls() {
+  if (!built) buildControls();
+  for (const [name, sp] of Object.entries(SLIDERS)) {
+    if (sp.input._held || document.activeElement === sp.input) continue;
+    const v = sp.cfg ? S.config[name] : sp.get();
+    const idx = String(nearest(sp.vals, v)), txt = sp.fmt(v);
+    if (sp.input.value !== idx) sp.input.value = idx; // touch the DOM only when something changed
+    if (sp.out.textContent !== txt) sp.out.textContent = txt;
+  }
+  $("road-hint").textContent =
+    `measured ${fmtMs(S.measuredRttMs)}` + (S.rttMs > 0 ? ", added by the road proxy" : ", same machine");
+  fill($("engines"), S.engines.map((e, i) => button(e.name, i + 1, i === S.engine, e.color, () => post(`/api/engine/${i}`))), `${S.engine}`);
+  const async = S.engines[S.engine].async;
+  SLIDERS.window.input.disabled = !async;
+  $("window-hint").textContent = async ? "async face: send them all, then read the replies" : "blocking face: one request per caller";
+  fill($("workloads"), S.workloads.map((w) => button(w.name, "", w.id === S.config.workload, LIME,
+    () => fetch("/api/config", { method: "POST", body: JSON.stringify({ workload: w.id }) }).catch(() => {}))), S.config.workload);
+  const zc = S.config.zeroCopy && (S.config.workload === "get" || S.config.workload === "mix");
+  $("workload-note").textContent = ((S.workloads.find((w) => w.id === S.config.workload) || {}).note || "") +
+    (zc ? "; the GETs use GetToBuffer into a buffer per request in flight (no retries)" : "");
+  $("size-hint").textContent = S.config.valueSize >= 1024 ?
+    "Large values: Docker Desktop's port forwarding stops near 1.7 Gbit/s. Run Redis natively for this (README)." : "";
+  document.querySelectorAll("[data-for]").forEach((el) => el.classList.toggle("hidden", !el.dataset.for.split(" ").includes(S.config.workload)));
+  // force a boolean: classList.toggle(name, undefined) flips the class instead of setting it
+  document.querySelectorAll("[data-eng]").forEach((el) => el.classList.toggle("hidden",
+    !el.dataset.eng.split(" ").includes(String(S.engine)) || (!!el.dataset.feature && !S.features[el.dataset.feature])));
+  for (const [id, field, on, off] of [["t-resp2", "resp2", "RESP2", "RESP3 (default)"],
+                                       ["t-disableIdentity", "disableIdentity", "off: no CLIENT SETINFO", "on (default)"],
+                                       ["t-zeroCopy", "zeroCopy", "GetToBuffer", "Get (default)"]]) {
+    const v = !!S.config[field];
+    fill($(id), [button(off, "", !v, LIME, () => fetch("/api/config", { method: "POST", body: JSON.stringify({ [field]: false }) })),
+                 button(on, "", v, LIME, () => fetch("/api/config", { method: "POST", body: JSON.stringify({ [field]: true }) }))], `${v}`);
+  }
+  const hints = [];
+  if (S.engine === 1 || S.engine === 2) {
+    if (S.config.maxConcurrentBatches > 1) hints.push("More batches at once sets Unordered: commands no longer run in submit order.");
+    if (S.config.maxQueued > 0) hints.push("Over the queue limit a command fails with ErrAutoPipelineQueueFull: watch the errors.");
+    if (S.config.adaptiveDelay && !S.config.maxFlushDelayUs) hints.push("Adaptive delay needs a flush delay to scale.");
+    if (S.engine === 2 && S.config.batchShards > 1) hints.push("Connections apply to the blocking face only: on the async face more than one needs Unordered.");
+  }
+  if (S.engine === 0 && S.config.minIdleConns > 0) hints.push("Warm connections are dialed ahead, so a load starts without a dial burst.");
+  if (S.engine === 0 && S.config.maxActiveConns > 0) hints.push(S.config.maxActiveConns < S.config.poolSize ?
+    "MaxActiveConns below PoolSize: requests past it fail at once with \"connection pool exhausted\", they do not wait. Set PoolSize to it or below to make callers wait." :
+    "Past MaxActiveConns, callers wait for a connection to be released.");
+  if (S.engine >= 3 && S.config.fdWindow > 0) hints.push("A full window blocks the submitter: no errors, the wait shows in latency and in the blocked card.");
+  $("opt-hint").textContent = hints.join(" ");
+  // experiments
+  const open = S.config.openRate > 0;
+  fill($("x-loop"), [button("closed loop", "", !open, LIME, () => fetch("/api/config", { method: "POST", body: JSON.stringify({ openRate: 0 }) })),
+                     button("open loop", "", open, LIME, () => fetch("/api/config", { method: "POST", body: JSON.stringify({ openRate: S.config.openRate || 100000 }) }))], `${open}`);
+  $("x-loop-hint").textContent = open ?
+    "Requests are scheduled at the target rate; latency starts at the scheduled time, so a client that falls behind shows it in p99." :
+    "Each caller sends its next request when the last reply is back: a slow client also sends less.";
+  if (!$("x-faults").childElementCount) {
+    const fault = (kind, label, title) => { const b = button(label, "", false, null, () =>
+      fetch(`/api/fault/${kind}`, { method: "POST" }).then(async (r) => { $("x-fault-status").textContent = r.ok ? `${label}: sent` : (await r.text()).trim(); })); b.title = title; return b; };
+    fill($("x-faults"), [fault("kill", "kill connections", "CLIENT KILL every engine connection"),
+                         fault("big?mb=1&n=1", "1 MB", "one GET of a 1 MB value through the engine"),
+                         fault("big?mb=10&n=1", "10 MB", "one GET of a 10 MB value through the engine: head-of-line blocking"),
+                         fault("big?mb=10&n=10", "10 MB ×10", "ten GETs of a 10 MB value at once: 100 MB through the engine"),
+                         fault("big?mb=50&n=1", "50 MB", "one GET of a 50 MB value through the engine"),
+                         fault("big?mb=1&n=100", "1 MB ×100", "a hundred GETs of a 1 MB value at once"),
+                         fault("block", "BLPOP 2 s", "a blocking command through the engine")]);
+  }
+  $("code").textContent = S.engines[S.engine].code;
+  $("code").style.color = S.engines[S.engine].color;
+}
+
+function renderKPI() {
+  const n = S.now;
+  const set = (id, v) => { const el = $(id); el.querySelector(".value").textContent = v; el.classList.toggle("warming", n.warming); };
+  set("k-rate", fmtRate(n.rate));
+  $("k-rate").querySelector(".note").textContent = n.ceiling > 0 ?
+    `road ceiling ${fmtRate(n.ceiling)} (${Math.round(n.rate / n.ceiling * 100)}% of it) · higher is better` :
+    "higher is better · no road ceiling at +0: the CPU decides";
+  set("k-server", fmtRate(n.serverRate));
+  const per = { ratelimit: 2, cachefill: 2 }[S.config.workload] || 1;
+  $("k-server-note").textContent = per > 1 ? `from INFO commandstats · ${per} commands per request` : "from INFO commandstats";
+  set("k-lat", fmtMs(n.p99ms));
+  $("k-p50").textContent = `p50 ${fmtMs(n.p50ms)} · lower is better`;
+  set("k-conns", n.conns < 0 ? "-" : n.conns.toString() + (n.spares > 0 ? ` + ${n.spares}` : ""));
+  $("k-conns").querySelector(".note").textContent = n.spares > 0 ?
+    `+ ${n.spares} idle, no name yet: warm spares (or another idle client) · lower is better` : "from CLIENT LIST, lower is better";
+  set("k-cpu", n.cores < 0 ? "-" : n.cores.toFixed(1) + " cores");
+  $("k-cpu").querySelector(".note").textContent = `client and road proxy · heap ${n.heapMB.toFixed(0)} MB, from the OS ${n.sysMB.toFixed(0)} MB`;
+  const f = S.finder || {}, lag = behind();
+  const disorder = S.config.workload === "order" ? S.trouble.disorder : 0;
+  $("status").innerHTML = f.running ? `<b>finder ${f.step}/${f.total}</b>: ${f.current}` :
+    lag ? `<span class="err">${lag}</span>` :
+    disorder > 0 ? `<span class="err">out of order: ${fmtCount(disorder)} replies</span>` :
+    n.warming ? "<b>warming up</b>" :
+    (n.errs > 0 ? `<span class="err">errors: ${n.errs} (${n.lastErr})</span>` : "live");
+}
+
+// prepare a canvas for crisp drawing at the device pixel ratio
+function setup(canvas) {
+  const dpr = window.devicePixelRatio || 1, w = canvas.clientWidth;
+  // height scales with the window, so the page fits a 1080p projector
+  const want = Math.round(Math.max(90, window.innerHeight * 0.10)); // throughput and latency: one size
+  if (canvas._h !== want) { canvas._h = want; canvas._w = -1; }
+  if (canvas._w !== w || canvas._dpr !== dpr) {
+    canvas._w = w; canvas._dpr = dpr;
+    canvas.width = w * dpr; canvas.height = canvas._h * dpr; canvas.style.height = canvas._h + "px";
+  }
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, canvas._h);
+  ctx.font = `13px ${getComputedStyle(document.body).fontFamily}`;
+  return { ctx, w, h: canvas._h };
+}
+
+// columns: the last points that fit, newest on the right
+function columns(w, left, right) {
+  const pts = S.history, colW = 5, gap = 1;
+  const fit = Math.max(Math.floor((w - left - right) / (colW + gap)), 1);
+  const start = Math.max(pts.length - fit, 0);
+  return { pts: pts.slice(start), colW, gap, x0: left };
+}
+function colour(p) { return p.warming ? WARM : S.engines[p.engine].color; }
+
+function drawThroughput() {
+  const { ctx, w, h } = setup($("tp"));
+  const left = 64, right = 12, top = 10, bottom = 22, ph = h - top - bottom;
+  const c = columns(w, left, right);
+  const peak = niceUp(Math.max(1, ...c.pts.map((p) => p.rate)) * 1.05);
+  ctx.strokeStyle = GRID; ctx.fillStyle = MUTED; ctx.lineWidth = 1; ctx.textAlign = "right"; ctx.textBaseline = "middle";
+  const steps = ph < 120 ? 2 : 4; // a short chart: fewer gridlines, labels that do not touch
+  for (let i = 0; i <= steps; i++) {
+    const y = top + ph - (ph * i) / steps;
+    ctx.beginPath(); ctx.moveTo(left, y); ctx.lineTo(w - right, y); ctx.stroke();
+    ctx.fillText(fmtRate((peak * i) / steps), left - 8, y);
+  }
+  c.pts.forEach((p, i) => {
+    const x = c.x0 + i * (c.colW + c.gap), bh = (p.rate / peak) * ph;
+    ctx.fillStyle = colour(p);
+    ctx.fillRect(x, top + ph - bh, c.colW, bh);
+    if (p.mark) { ctx.fillStyle = LIME; ctx.textAlign = "center"; ctx.fillText(p.mark, x + c.colW / 2, h - 9); }
+    if (p.errRate > 0) { // a red mark under the column: errors in this tick
+      ctx.fillStyle = "#ff4438"; ctx.beginPath();
+      ctx.moveTo(x - 1, top + ph + 9); ctx.lineTo(x + c.colW + 1, top + ph + 9); ctx.lineTo(x + c.colW / 2, top + ph + 2); ctx.fill();
+    }
+  });
+  if (c.pts.length) {
+    const last = c.pts[c.pts.length - 1], x = c.x0 + (c.pts.length - 1) * (c.colW + c.gap);
+    ctx.fillStyle = TEXT; ctx.textAlign = "right"; ctx.font = `bold 15px ${getComputedStyle(document.body).fontFamily}`;
+    ctx.fillText(fmtRate(last.rate), Math.min(x + 4, w - right), top + ph - (last.rate / peak) * ph - 12);
+  }
+}
+
+function drawLatency() {
+  const { ctx, w, h } = setup($("lat"));
+  const left = 64, right = 12, top = 10, bottom = 8, ph = h - top - bottom;
+  const c = columns(w, left, right);
+  const lo = 0.1, hi = niceUp(Math.max(2, S.rttMs * 2, ...c.pts.map((p) => p.p99ms)) * 1.1);
+  const y = (v) => top + ph - ((Math.log10(Math.max(v, lo)) - Math.log10(lo)) / (Math.log10(hi) - Math.log10(lo))) * ph;
+  ctx.strokeStyle = GRID; ctx.fillStyle = MUTED; ctx.lineWidth = 1; ctx.textAlign = "right"; ctx.textBaseline = "middle";
+  for (const v of [0.1, 1, 10, 100, 1000].filter((v) => v <= hi)) {
+    ctx.beginPath(); ctx.moveTo(left, y(v)); ctx.lineTo(w - right, y(v)); ctx.stroke();
+    ctx.fillText(v >= 1 ? `${v} ms` : `${v * 1000} µs`, left - 8, y(v));
+  }
+  c.pts.forEach((p, i) => {
+    if (p.p99ms <= 0) return;
+    const x = c.x0 + i * (c.colW + c.gap);
+    ctx.fillStyle = colour(p);
+    ctx.fillRect(x, y(p.p99ms), c.colW, top + ph - y(p.p99ms));
+  });
+  ctx.strokeStyle = TEXT; ctx.lineWidth = 2; ctx.beginPath();
+  let pen = false;
+  c.pts.forEach((p, i) => {
+    const x = c.x0 + i * (c.colW + c.gap) + c.colW / 2;
+    if (p.p50ms <= 0) { pen = false; return; }
+    if (pen) ctx.lineTo(x, y(p.p50ms)); else ctx.moveTo(x, y(p.p50ms));
+    pen = true;
+  });
+  ctx.stroke();
+  if (S.rttMs > 0) {
+    ctx.setLineDash([6, 5]); ctx.strokeStyle = LIME; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(left, y(S.rttMs)); ctx.lineTo(w - right, y(S.rttMs)); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle = LIME; ctx.textAlign = "right"; ctx.fillText(`one round trip, ${S.rttMs} ms`, w - right - 6, y(S.rttMs) - 9);
+  }
+}
+
+function renderLegend() {
+  if ($("legend").childElementCount) return;
+  fill($("legend"), [...S.engines.map((e) => Object.assign(document.createElement("span"), { innerHTML: `<i style="background:${e.color}"></i>${e.name}` })),
+    Object.assign(document.createElement("span"), { innerHTML: `<i style="background:${WARM}"></i>warm-up` })]);
+}
+
+function renderBoard() {
+  const boardInfo = `+${S.rttMs} ms, ${S.callers} caller${S.callers === 1 ? "" : "s"}: all the time each ran after warm-up. ▲ most req/s, ● lowest p99. ✕ errors, or out of order in the ordering check: cannot be the best.`;
+  if ($("board-sub").title !== boardInfo) $("board-sub").title = boardInfo;
+  if (!S.board.length) {
+    $("board").innerHTML = `<div class="hint" style="margin:0">Each engine you run on this road and load shows here once its warm-up is over.</div>`;
+    $("board")._key = undefined; fill($("board-rest"), [], "");
+    return;
+  }
+  const best = Math.max(...S.board.map((r) => r.rate));
+  // on top: the most requests/s, then the lowest p99 (one row when it is the same scenario)
+  const top = [S.board.findIndex((r) => r.mostRate), S.board.findIndex((r) => r.lowestP99)]
+    .filter((i, k, a) => i >= 0 && a.indexOf(i) === k);
+  const rest = S.board.filter((_, i) => !top.includes(i));
+  const row = (r) => {
+    const el = document.createElement("div"); el.className = "brow";
+    const color = S.engines[r.engine].color;
+    el.innerHTML = `<span class="bname" style="color:${color}" title="${r.name}">${r.name}</span>
+      <span><div class="bar" style="width:${Math.max((r.rate / best) * 100, 1)}%;background:${color}"></div></span>
+      <span class="num">${fmtRate(r.rate)}</span><span class="num">p99 ${fmtMs(r.p99ms)}</span>
+      <span class="num">${r.conns} conn${r.conns === 1 ? "" : "s"}</span>
+      <span class="num" style="color:var(--muted)">${Math.round(r.runS)} s</span>
+      <span class="tag"${r.failed ? ' style="color:var(--hyper)" title="' + r.failed + '"' : ""}>${r.failed ? "✕" : (r.mostRate ? "▲" : "") + (r.lowestP99 ? "●" : "")}</span>`;
+    if (r.failed) { el.classList.add("failed"); el.title = `${r.name}: ${r.failed}, cannot be the best`; }
+    return el;
+  };
+  fill($("board"), top.map((i) => row(S.board[i])), JSON.stringify(top.map((i) => S.board[i])));
+  fill($("board-rest"), rest.map(row), JSON.stringify(rest));
+}
+
+let connFilled = false;
+function renderConn() {
+  const c = S.conn;
+  if (!connFilled) { // fill once from the server; never overwrite what you type
+    $("c-host").value = c.host || "localhost"; $("c-port").value = c.port || 6379; $("c-user").value = c.user || "";
+    connFilled = true;
+  }
+  const st = $("c-status");
+  if (c.connected) { st.className = "hint ok"; st.textContent = `connected to ${c.host}:${c.port}` + (c.version ? `, Redis ${c.version}` : "") + (c.direct ? ", direct (no road proxy)" : ""); }
+  else { st.className = "hint bad"; st.textContent = `not connected: ${c.error}`; }
+  const sum = $("conn-sum"); // shown while the drawer is collapsed
+  sum.textContent = st.textContent; sum.classList.toggle("err", !c.connected);
+  if (!c.connected) $("d-conn").open = true; // nothing to show without a Redis: open the form
+}
+$("c-go").onclick = async () => {
+  const st = $("c-status"); st.className = "hint"; st.textContent = "connecting...";
+  const body = { host: $("c-host").value.trim(), port: Number($("c-port").value), user: $("c-user").value, password: $("c-pass").value };
+  try {
+    const r = await fetch("/api/connect", { method: "POST", body: JSON.stringify(body) });
+    if (!r.ok) { st.className = "hint bad"; st.textContent = "connect failed: " + (await r.text()).trim(); }
+  } catch (e) { st.className = "hint bad"; st.textContent = "connect failed: " + e; }
+};
+["c-host", "c-port", "c-user", "c-pass"].forEach((id) => $(id).addEventListener("keydown", (ev) => {
+  ev.stopPropagation(); // typing here must not switch engines
+  if (ev.key === "Enter") $("c-go").click();
+}));
+
+// behind is the open-loop warning, or "" when the schedule holds.
+function behind() {
+  const lag = S.trouble.lagMs;
+  return S.config.openRate > 0 && lag > 100 ? `open loop: ${fmtMs(lag)} behind schedule` : "";
+}
+
+let finderWasRunning = false;
+function renderFinder() {
+  const f = Object.assign({ results: [], best: {} }, S.finder);
+  f.results = f.results || []; f.best = f.best || {};
+  $("f-async").disabled = !!f.running;
+  const start = () => fetch(`/api/finder/start?async=${$("f-async").checked ? 1 : 0}`, { method: "POST" }).then(async (r) => { if (!r.ok) $("f-status").textContent = (await r.text()).trim(); });
+  const stop = () => fetch("/api/finder/stop", { method: "POST" });
+  fill($("f-btn"), [f.running ? button("stop", "", false, null, stop) : button(f.results.length ? "run again" : "start", "", true, LIME, start)], `${f.running}${f.results.length > 0}`);
+  $("f-status").textContent = f.running ? `running ${f.step} of ${f.total}: ${f.current} · on ${f.load}` :
+    (f.results.length ? `on ${f.load}` + (f.note ? ` · ${f.note}` : "") : "Runs every engine and mechanism on the current road, workload and callers (or open-loop rate), about a minute.");
+  $("t-lag").textContent = behind();
+  // the ordering check: out-of-order replies are a failure, shown on the errors card
+  const ord = $("t-order"), dis = S.trouble.disorder;
+  if (S.config.workload !== "order") { ord.textContent = ""; }
+  else if (dis > 0) { ord.textContent = `out of order: ${fmtCount(dis)}`; ord.style.color = "var(--hyper)"; }
+  else { ord.textContent = "all in order"; ord.style.color = "var(--lime)"; }
+  $("t-errors").querySelector(".value").classList.toggle("bad", dis > 0 && S.config.workload === "order" || S.trouble.errRates.some((v) => v > 0));
+  if (finderWasRunning && !f.running) $("d-experiments").open = true; // done: show the results
+  finderWasRunning = f.running;
+  if (!f.results.length) { fill($("f-results"), [], "none"); return; }
+  const tags = (i) => [["rate", "most req/s"], ["p99", "lowest p99"], ["cpu", "least CPU"], ["mem", "least memory"]]
+    .filter(([k]) => f.best[k] === i).map(([, t]) => t).join(" · ");
+  const head = document.createElement("div"); head.className = "frow head";
+  head.innerHTML = `<span>setup</span><span class="num">req/s</span><span class="num">p50</span><span class="num">p99</span>` +
+    `<span class="num">CPU-s per 1M</span><span class="num">heap</span><span class="num">conns</span><span class="num">errors</span><span></span>`;
+  const rows = f.results.map((r, i) => {
+    const el = document.createElement("div"); el.className = "frow" + (r.ok ? "" : " out");
+    const why = r.ok ? tags(i) : (r.errs > 0 ? "errors" : (r.disorder > 0 ? "out of order" : (!r.keptUp ? "behind schedule" : "no requests")));
+    el.innerHTML = `<span style="color:${S.engines[r.engine].color}">${r.label}</span><span class="num">${fmtRate(r.rate)}</span>` +
+      `<span class="num">${fmtMs(r.p50ms)}</span><span class="num">${fmtMs(r.p99ms)}</span><span class="num">${r.cpuPerM.toFixed(1)}</span>` +
+      `<span class="num">${r.heapMB.toFixed(0)} MB</span><span class="num">${r.conns}</span><span class="num">${r.errs}</span>` +
+      `<span class="tags"${r.ok ? "" : ' style="color:var(--hyper)"'}>${why}</span>`;
+    return el;
+  });
+  fill($("f-results"), [head, ...rows], JSON.stringify([f.results, f.best]));
+}
+
+function renderOTel() {
+  const o = S.otel;
+  const set = (on) => fetch("/api/config", { method: "POST", body: JSON.stringify({ otel: on }) });
+  fill($("o-toggle"), [button("off", "", !o.on, LIME, () => set(false)), button("on", "", o.on, LIME, () => set(true))], `${o.on}`);
+  $("o-hint").textContent = o.on ?
+    "extra/redisotel-native, read in this process every tick. The pool and full duplex record each command; batching records each batch (PIPELINE). The cards above count requests." :
+    "Off: go-redis records nothing. On: its own metrics, read in this process. On full duplex it costs a lot (go-redis v9.23: about 10x at high rates), so compare engines with it off.";
+  if (!o.on) { fill($("o-ops"), [], "off"); $("o-lines").innerHTML = ""; return; }
+  const head = document.createElement("div"); head.className = "orow head";
+  head.innerHTML = `<span>db.operation.name</span><span class="num">per second</span><span class="num">mean</span><span class="num">p50</span><span class="num">p99</span><span>commands per batch</span>`;
+  const rows = o.ops.slice(0, 5).map((op) => {
+    const r = document.createElement("div"); r.className = "orow";
+    r.innerHTML = `<b>${op.name}</b><span class="num">${fmtRate(op.perS)}</span><span class="num">${fmtMs(op.meanMs)}</span>` +
+      `<span class="num">${fmtMs(op.p50Ms)}</span><span class="num">${fmtMs(op.p99Ms)}</span><span>${op.cmdsPerOp ? op.cmdsPerOp.toFixed(1) : ""}</span>`;
+    return r;
+  });
+  fill($("o-ops"), [head, ...rows], JSON.stringify(o.ops.slice(0, 5)));
+  const pools = o.pools.length ? o.pools.map((p) => `${p.name}: <b>${p.used}</b> used, <b>${p.idle}</b> idle`).join(" · ") : "none";
+  const list = (xs) => xs.length ? xs.map((x) => `${x.kind} <b>${fmtRate(x.perS)}</b>/s`).join(", ") : "<b>0</b>";
+  $("o-lines").innerHTML =
+    `db.client.connection.count: ${pools}` +
+    `<br>pending_requests <b>${o.pending}</b> · wait_time: <b>${fmtRate(o.waitPerS)}</b> checkouts/s, p99 <b>${fmtMs(o.waitP99Ms)}</b>` +
+    `<br>create_time: <b>${o.dialsPerS.toFixed(1)}</b> dials/s${o.dialsPerS > 0 ? `, p99 <b>${fmtMs(o.dialP99Ms)}</b>` : ""}` +
+    `<br>redis.client.errors: ${list(o.errors)} · connection.closed: ${list(o.closed)}`;
+}
+
+function renderTrouble() {
+  const t = S.trouble, rate = (v) => v >= 1 ? fmtRate(v) + "/s" : (v > 0 ? "<1/s" : "0");
+  const errSum = t.errRates.reduce((a, b) => a + b, 0);
+  const e = $("t-errors");
+  e.querySelector(".value").textContent = rate(errSum);
+  e.querySelector(".value").classList.toggle("bad", errSum > 0);
+  const kinds = S.errKinds.map((k, i) => t.errRates[i] > 0 ? `${k} <b>${rate(t.errRates[i])}</b>` : null).filter(Boolean);
+  e.querySelector(".lines").innerHTML = (kinds.length ? kinds.join(" · ") : "none in the last tick") +
+    `<br>total <b>${t.errTotal.toLocaleString("en")}</b> since this engine started` +
+    (S.config.workload === "order" ? `<br>out of order <b style="color:${t.disorder ? "var(--hyper)" : "var(--lime)"}">${t.disorder.toLocaleString("en")}</b> replies` : "") +
+    (t.lastErr ? `<br><span class="err" style="color:var(--hyper)">last: ${t.lastErr.replace(/[<>&]/g, "")}</span>` : "");
+
+  const b = $("t-blocked"), pooled = S.engine === 0;
+  const head = pooled ? t.poolWaiting : t.queued;
+  b.querySelector(".value").textContent = head.toLocaleString("en");
+  b.querySelector(".value").classList.toggle("bad", pooled ? t.poolWaiting > 0 : false);
+  b.querySelector(".lines").innerHTML = (pooled ?
+      `callers waiting for a pool connection now` :
+      `commands queued in the autopipeliner, not yet sent`) +
+    `<br>in flight <b>${t.inFlight.toLocaleString("en")}</b> of <b>${t.inFlightMax.toLocaleString("en")}</b> (callers × in flight)` +
+    (t.windowTotal ? `<br>full-duplex window <b>${t.windowTotal.toLocaleString("en")}</b> (per pipe × pipes): ` +
+      (t.windowFull ? `<b style="color:var(--hyper)">full, submitters wait</b>` : "room left") : "") +
+    (S.config.openRate > 0 ? `<br>open loop: behind schedule by <b>${fmtMs(t.lagMs)}</b>` : "") +
+    `<br>pool waits <b>${rate(t.waitsPerSec)}</b>, average wait <b>${fmtMs(t.avgWaitMs)}</b>, wait timeouts <b>${rate(t.poolTimeoutsPerSec)}</b>`;
+
+  const d = $("t-delayed");
+  d.querySelector(".value").textContent = `${t.delayedPct.toFixed(t.delayedPct < 10 ? 1 : 0)}%`;
+  d.querySelector(".value").classList.toggle("bad", t.delayedPct >= 1);
+  d.querySelector(".lines").innerHTML = `<b>${rate(t.delayedRate)}</b> slower than <b>${fmtMs(t.slowMs)}</b>` +
+    (S.config.slowMs === 0 ? " (2 round trips + 1 ms)" : "");
+  fill($("t-slow"), [0, 5, 10, 50, 100].map((v) => button(v === 0 ? "auto" : `${v} ms`, "", S.config.slowMs === v, LIME,
+    () => fetch("/api/config", { method: "POST", body: JSON.stringify({ slowMs: v }) }))), `${S.config.slowMs}`);
+}
+
+function render() {
+  if (!S) return;
+  renderTrouble();
+  document.querySelectorAll(".kpis .kpi").forEach((c) => { // hidden detail lines: one hover away
+    const d = c.querySelector(".lines") || c.querySelector(".note");
+    const tmp = document.createElement("div"); // hidden elements lose <br> in innerText: rebuild the lines
+    tmp.innerHTML = d ? d.innerHTML.replace(/<br\s*\/?>/gi, "\n") : "";
+    const t = tmp.textContent;
+    if (c.title !== t) c.title = t;
+  });
+  renderOTel();
+  renderFinder();
+  renderConn();
+  $("meta").textContent = `go-redis ${S.goRedis}`;
+  renderControls(); renderKPI(); renderLegend(); drawThroughput(); drawLatency(); renderBoard();
+  fill($("events"), S.events.slice().reverse().map((e) => Object.assign(document.createElement("li"), { textContent: e })), S.events.join("\n"));
+}
+
+$("f-async").checked = localStorage.getItem("finder:async") !== "0";
+$("f-async").addEventListener("change", () => localStorage.setItem("finder:async", $("f-async").checked ? "1" : "0"));
+document.querySelectorAll("details.drawer, details.code-drawer").forEach((d) => {
+  const key = "drawer:" + d.id;
+  d.open = new URLSearchParams(location.search).has("open") || localStorage.getItem(key) === "1";
+  d.addEventListener("toggle", () => { localStorage.setItem(key, d.open ? "1" : "0"); render(); });
+});
+if (new URLSearchParams(location.search).has("once")) { // one snapshot, no stream: for screenshots
+  fetch("/api/state").then((r) => r.json()).then((s) => { S = s; render(); });
+} else {
+  // ?mutations: count DOM changes per element (a debug aid for flicker), shown in <pre id="mutations">
+if (new URLSearchParams(location.search).has("mutations")) {
+  const counts = {}, pre = Object.assign(document.createElement("pre"), { id: "mutations" });
+  document.body.append(pre);
+  const name = (n) => { for (let e = n.nodeType === 1 ? n : n.parentElement; e; e = e.parentElement) if (e.id) return e.id; return "?"; };
+  new MutationObserver((ms) => {
+    for (const m of ms) { const k = `${name(m.target)} ${m.type}${m.attributeName ? ":" + m.attributeName : ""}`; counts[k] = (counts[k] || 0) + 1; }
+    pre.textContent = JSON.stringify(counts);
+  }).observe(document.querySelector("main"), { subtree: true, childList: true, attributes: true, characterData: true });
+}
+const es = new EventSource("/api/stream");
+  es.onmessage = (ev) => { S = JSON.parse(ev.data); render(); };
+  es.onerror = () => { $("status").innerHTML = `<span class="err">disconnected: is the demo still running?</span>`; };
+}
+window.addEventListener("resize", render);
+window.addEventListener("keydown", (ev) => {
+  if (!S || ev.metaKey || ev.ctrlKey || ev.altKey) return;
+  const k = ev.key;
+  if (k >= "1" && k <= "5") post(`/api/engine/${Number(k) - 1}`);
+  else if (k === "r") { const i = S.rttSteps.indexOf(S.rttMs); post(`/api/rtt/${S.rttSteps[(i + 1) % S.rttSteps.length]}`); }
+  else if (k === "+" || k === "=") { const i = S.callerSteps.indexOf(S.callers); post(`/api/callers/${S.callerSteps[Math.min(i + 1, S.callerSteps.length - 1)]}`); }
+  else if (k === "-" || k === "_") { const i = S.callerSteps.indexOf(S.callers); post(`/api/callers/${S.callerSteps[Math.max(i - 1, 0)]}`); }
+  else if (k === "w") { const i = S.windowSteps.indexOf(S.window); post(`/api/window/${S.windowSteps[(i + 1) % S.windowSteps.length]}`); }
+  else if (k === "x") post("/api/clear");
+});
+</script>
+</body>
+</html>
