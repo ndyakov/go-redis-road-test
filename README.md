@@ -33,6 +33,46 @@ The truth comes from Redis, read on a separate connection that does not go throu
   sets that name, with this process's id, so two demos on one Redis do not count each other; the
   demo's own probe and stats connections use other names.
 
+## Install
+
+Requires Go 1.26 or newer. The browser page is built into the binary, so the binary is all you need
+on the machine that runs the load.
+
+```bash
+go install github.com/ndyakov/go-redis-road-test@latest
+go-redis-road-test --web 127.0.0.1:8080 --addr redis-host:6379
+```
+
+`go install` puts the binary in `$(go env GOPATH)/bin`; add that directory to your `PATH`. It builds
+against the go-redis version pinned in `go.mod` (v9.23.0). To try another go-redis version, clone
+the repository and use `run.sh` (see [Any go-redis version](#any-go-redis-version)).
+
+**On a cloud client instance.** Run the demo on a machine close to your Redis, so the numbers show
+your network and not your laptop's. The web page has no login, so keep it on `127.0.0.1` and reach
+it through an SSH tunnel:
+
+```bash
+# on your laptop
+ssh -L 8080:127.0.0.1:8080 user@client-instance
+# on the client instance (the --addr is where your Redis is)
+REDIS_PASSWORD=... go-redis-road-test --web 127.0.0.1:8080 --addr redis-host:6379 --user default
+```
+
+Then open http://127.0.0.1:8080 on your laptop. Add `--direct` when Redis is already across a real
+network: the demo then connects straight to it, without its road proxy, and the RTT setting does
+nothing.
+
+**From a clone:**
+
+```bash
+git clone https://github.com/ndyakov/go-redis-road-test.git
+cd go-redis-road-test
+go run . --web 127.0.0.1:8080
+```
+
+The rest of this README uses `go run .`; with an installed binary, run `go-redis-road-test` with the
+same flags.
+
 ## 1. Redis
 
 The demo connects to `localhost:6379` by default. Point it at any Redis you like: with flags, or in
