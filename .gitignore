@@ -1,3 +1,4 @@
 /engines
 dump.rdb
 /dist/
+/go-redis-road-test

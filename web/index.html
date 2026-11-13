@@ -113,7 +113,7 @@
   details.drawer .finder { background: none; border: none; border-top: 1px solid var(--line); border-radius: 0; padding: 14px 0 0; margin-top: 14px; }
   .finder h2 { margin: 0 0 6px; font-size: 16px; font-weight: 600; display: flex; gap: 12px; align-items: center; }
   .finder .hint { margin: 0 0 6px; }
-  .frow { display: grid; grid-template-columns: 260px 90px 90px 90px 120px 90px 70px 70px 1fr; gap: 8px; font-size: 14px;
+  .frow { display: grid; grid-template-columns: 260px 90px 90px 90px 120px 90px 90px 90px 70px 70px 1fr; gap: 8px; font-size: 14px;
           font-variant-numeric: tabular-nums; padding: 3px 0; align-items: center; }
   .frow.head { color: var(--muted); font-size: 12px; }
   .frow .num { text-align: right; }
@@ -131,7 +131,7 @@
   .orow .num { text-align: right; }
   .otel .lines { color: var(--muted); font-size: 13px; line-height: 1.6; font-variant-numeric: tabular-nums; }
   .otel .lines b { color: var(--text); font-weight: 600; }
-  .brow { display: grid; grid-template-columns: 160px 1fr 58px 100px 72px 44px 26px; gap: 8px; align-items: center;
+  .brow { display: grid; grid-template-columns: 128px 1fr 58px 100px 72px 40px 44px 26px; gap: 8px; align-items: center;
           padding: 5px 0; font-variant-numeric: tabular-nums; font-size: 15px; }
   .brow .bar { height: 16px; border-radius: 4px; }
   .brow .num { text-align: right; }
@@ -176,7 +176,7 @@
     <div class="cpanel">
       <h3>Workload options</h3>
       <div class="label" data-for="mix">Writes</div><div class="slider" id="s-writePct" data-for="mix"></div>
-      <div class="label" data-for="get mix">GET</div><div class="row" id="t-zeroCopy" data-for="get mix"></div>
+      <div class="label" data-flag="zeroCopy">GET</div><div class="row" id="t-zeroCopy" data-flag="zeroCopy"></div>
       <div class="label">Value size</div><div class="slider" id="s-valueSize"></div>
       <div class="hint full" id="size-hint" style="margin:0"></div>
       <div class="label" data-for="page">Keys per page</div><div class="slider" id="s-fanOut" data-for="page"></div>
@@ -275,7 +275,7 @@
 
   <div class="bottom">
   <section class="panel kpi" id="k-server"><div class="name">commands/s seen by Redis</div><div class="value">-</div><div class="note" id="k-server-note">from INFO commandstats</div></section>
-  <section class="panel kpi" id="k-cpu"><div class="name">client CPU</div><div class="value">-</div><div class="note">this process: client and road proxy</div></section>
+  <section class="panel kpi" id="k-cpu"><div class="name">client CPU<span class="info" title="From Go's runtime/metrics, over the same 2 s as requests/s, warm-up left out. allocs/req: heap allocations (tiny ones included) per request completed. B/req: heap bytes allocated per request. GC: share of the CPU this process's Go code used that went to the garbage collector (it moves at GC cycles). Peak heap: the most memory in heap objects (live, and dead not yet swept) since the engine or a setting last restarted. These count the whole process: the road proxy (it runs here; not with --direct) and the demo's own stats and web code too. Under 1000 requests in 2 s the per-request numbers show as low rate: that share is then too large.">i</span></div><div class="value">-</div><div class="note">this process: client and road proxy</div><div class="note" id="k-alloc"></div></section>
   </div>
 
   <details class="drawer" id="d-conn">
@@ -315,6 +315,14 @@ function fmtCount(n) {
   if (n < 1000) return String(n);
   if (n < 1e6) return `> ${Math.floor(n / 1000)}K`;
   return `> ${(Math.floor(n / 1e5) / 10).toFixed(1)}M`;
+}
+
+// fmtAllocs is allocations per request; fmtSize is bytes, e.g. per request.
+function fmtAllocs(v) { return v < 10 ? v.toFixed(1) : Math.round(v).toString(); }
+function fmtSize(v) {
+  if (v >= 1 << 20) return (v / (1 << 20)).toFixed(1) + " MiB";
+  if (v >= 1024) return (v / 1024).toFixed(1) + " KiB";
+  return Math.round(v) + " B";
 }
 
 // fmtWhole is a whole number of ms as "100 ms" or "2 s", for settings.
@@ -409,6 +417,8 @@ function buildControls() {
   }
   built = true;
 }
+// the selected workload's entry in S.workloads (workloads.go); {} if it is missing
+function workload() { return S.workloads.find((w) => w.id === S.config.workload) || {}; }
 function renderControls() {
   if (!built) buildControls();
   for (const [name, sp] of Object.entries(SLIDERS)) {
@@ -426,12 +436,13 @@ function renderControls() {
   $("window-hint").textContent = async ? "async face: send them all, then read the replies" : "blocking face: one request per caller";
   fill($("workloads"), S.workloads.map((w) => button(w.name, "", w.id === S.config.workload, LIME,
     () => fetch("/api/config", { method: "POST", body: JSON.stringify({ workload: w.id }) }).catch(() => {}))), S.config.workload);
-  const zc = S.config.zeroCopy && (S.config.workload === "get" || S.config.workload === "mix");
-  $("workload-note").textContent = ((S.workloads.find((w) => w.id === S.config.workload) || {}).note || "") +
+  const wl = workload(), zc = S.config.zeroCopy && !!wl.zeroCopy;
+  $("workload-note").textContent = (wl.note || "") +
     (zc ? "; the GETs use GetToBuffer into a buffer per request in flight (no retries)" : "");
   $("size-hint").textContent = S.config.valueSize >= 1024 ?
     "Large values: Docker Desktop's port forwarding stops near 1.7 Gbit/s. Run Redis natively for this (README)." : "";
   document.querySelectorAll("[data-for]").forEach((el) => el.classList.toggle("hidden", !el.dataset.for.split(" ").includes(S.config.workload)));
+  document.querySelectorAll("[data-flag]").forEach((el) => el.classList.toggle("hidden", !wl[el.dataset.flag]));
   // force a boolean: classList.toggle(name, undefined) flips the class instead of setting it
   document.querySelectorAll("[data-eng]").forEach((el) => el.classList.toggle("hidden",
     !el.dataset.eng.split(" ").includes(String(S.engine)) || (!!el.dataset.feature && !S.features[el.dataset.feature])));
@@ -485,7 +496,7 @@ function renderKPI() {
     `road ceiling ${fmtRate(n.ceiling)} (${Math.round(n.rate / n.ceiling * 100)}% of it) · higher is better` :
     "higher is better · no road ceiling at +0: the CPU decides";
   set("k-server", fmtRate(n.serverRate));
-  const per = { ratelimit: 2, cachefill: 2 }[S.config.workload] || 1;
+  const per = workload().commands || 1;
   $("k-server-note").textContent = per > 1 ? `from INFO commandstats · ${per} commands per request` : "from INFO commandstats";
   set("k-lat", fmtMs(n.p99ms));
   $("k-p50").textContent = `p50 ${fmtMs(n.p50ms)} · lower is better`;
@@ -494,8 +505,10 @@ function renderKPI() {
     `+ ${n.spares} idle, no name yet: warm spares (or another idle client) · lower is better` : "from CLIENT LIST, lower is better";
   set("k-cpu", n.cores < 0 ? "-" : n.cores.toFixed(1) + " cores");
   $("k-cpu").querySelector(".note").textContent = `client and road proxy · heap ${n.heapMB.toFixed(0)} MB, from the OS ${n.sysMB.toFixed(0)} MB`;
+  const perReq = n.allocLowRate ? "allocs/req low rate · B/req low rate" : `allocs/req ${fmtAllocs(n.allocsPerReq)} · B/req ${fmtSize(n.bytesPerReq)}`;
+  $("k-alloc").textContent = `${perReq} · GC ${n.gcPct.toFixed(1)}% · peak heap ${n.peakHeapMB.toFixed(0)} MB`;
   const f = S.finder || {}, lag = behind();
-  const disorder = S.config.workload === "order" ? S.trouble.disorder : 0;
+  const disorder = workload().checksOrder ? S.trouble.disorder : 0;
   $("status").innerHTML = f.running ? `<b>finder ${f.step}/${f.total}</b>: ${f.current}` :
     lag ? `<span class="err">${lag}</span>` :
     disorder > 0 ? `<span class="err">out of order: ${fmtCount(disorder)} replies</span>` :
@@ -598,7 +611,7 @@ function renderLegend() {
 }
 
 function renderBoard() {
-  const boardInfo = `+${S.rttMs} ms, ${S.callers} caller${S.callers === 1 ? "" : "s"}: all the time each ran after warm-up. ▲ most req/s, ● lowest p99. ✕ errors, or out of order in the ordering check: cannot be the best.`;
+  const boardInfo = `+${S.rttMs} ms, ${S.callers} caller${S.callers === 1 ? "" : "s"}: all the time each ran after warm-up. The number before the seconds: heap allocations per request, whole process (see client CPU), "low" at a low rate. ▲ most req/s, ● lowest p99. ✕ errors, or out of order in the ordering check: cannot be the best.`;
   if ($("board-sub").title !== boardInfo) $("board-sub").title = boardInfo;
   if (!S.board.length) {
     $("board").innerHTML = `<div class="hint" style="margin:0">Each engine you run on this road and load shows here once its warm-up is over.</div>`;
@@ -617,6 +630,7 @@ function renderBoard() {
       <span><div class="bar" style="width:${Math.max((r.rate / best) * 100, 1)}%;background:${color}"></div></span>
       <span class="num">${fmtRate(r.rate)}</span><span class="num">p99 ${fmtMs(r.p99ms)}</span>
       <span class="num">${r.conns} conn${r.conns === 1 ? "" : "s"}</span>
+      <span class="num" title="heap allocations per request, whole run${r.allocLowRate ? ": low rate, not reliable" : ""}"${r.allocLowRate ? ' style="color:var(--muted)"' : ""}>${r.allocLowRate ? "low" : fmtAllocs(r.allocsPerReq)}</span>
       <span class="num" style="color:var(--muted)">${Math.round(r.runS)} s</span>
       <span class="tag"${r.failed ? ' style="color:var(--hyper)" title="' + r.failed + '"' : ""}>${r.failed ? "✕" : (r.mostRate ? "▲" : "") + (r.lowestP99 ? "●" : "")}</span>`;
     if (r.failed) { el.classList.add("failed"); el.title = `${r.name}: ${r.failed}, cannot be the best`; }
@@ -671,25 +685,29 @@ function renderFinder() {
     (f.results.length ? `on ${f.load}` + (f.note ? ` · ${f.note}` : "") : "Runs every engine and mechanism on the current road, workload and callers (or open-loop rate), about a minute.");
   $("t-lag").textContent = behind();
   // the ordering check: out-of-order replies are a failure, shown on the errors card
-  const ord = $("t-order"), dis = S.trouble.disorder;
-  if (S.config.workload !== "order") { ord.textContent = ""; }
+  const ord = $("t-order"), dis = S.trouble.disorder, checks = !!workload().checksOrder;
+  if (!checks) { ord.textContent = ""; }
   else if (dis > 0) { ord.textContent = `out of order: ${fmtCount(dis)}`; ord.style.color = "var(--hyper)"; }
   else { ord.textContent = "all in order"; ord.style.color = "var(--lime)"; }
-  $("t-errors").querySelector(".value").classList.toggle("bad", dis > 0 && S.config.workload === "order" || S.trouble.errRates.some((v) => v > 0));
+  $("t-errors").querySelector(".value").classList.toggle("bad", dis > 0 && checks || S.trouble.errRates.some((v) => v > 0));
   if (finderWasRunning && !f.running) $("d-experiments").open = true; // done: show the results
   finderWasRunning = f.running;
   if (!f.results.length) { fill($("f-results"), [], "none"); return; }
-  const tags = (i) => [["rate", "most req/s"], ["p99", "lowest p99"], ["cpu", "least CPU"], ["mem", "least memory"]]
+  const tags = (i) => [["rate", "most req/s"], ["p99", "lowest p99"], ["cpu", "least CPU"], ["mem", "least memory"], ["allocs", "fewest allocations"]]
     .filter(([k]) => f.best[k] === i).map(([, t]) => t).join(" · ");
   const head = document.createElement("div"); head.className = "frow head";
   head.innerHTML = `<span>setup</span><span class="num">req/s</span><span class="num">p50</span><span class="num">p99</span>` +
-    `<span class="num">CPU-s per 1M</span><span class="num">heap</span><span class="num">conns</span><span class="num">errors</span><span></span>`;
+    `<span class="num">CPU-s per 1M</span><span class="num">heap</span>` +
+    `<span class="num" title="heap allocations per request, whole process (see client CPU)">allocs/req</span><span class="num" title="heap bytes allocated per request, whole process">B/req</span>` +
+    `<span class="num">conns</span><span class="num">errors</span><span></span>`;
+  const alloc = (r, v) => r.allocLowRate ? '<span class="num" style="color:var(--muted)" title="low rate: not reliable">low rate</span>' : `<span class="num">${v}</span>`;
   const rows = f.results.map((r, i) => {
     const el = document.createElement("div"); el.className = "frow" + (r.ok ? "" : " out");
     const why = r.ok ? tags(i) : (r.errs > 0 ? "errors" : (r.disorder > 0 ? "out of order" : (!r.keptUp ? "behind schedule" : "no requests")));
     el.innerHTML = `<span style="color:${S.engines[r.engine].color}">${r.label}</span><span class="num">${fmtRate(r.rate)}</span>` +
       `<span class="num">${fmtMs(r.p50ms)}</span><span class="num">${fmtMs(r.p99ms)}</span><span class="num">${r.cpuPerM.toFixed(1)}</span>` +
-      `<span class="num">${r.heapMB.toFixed(0)} MB</span><span class="num">${r.conns}</span><span class="num">${r.errs}</span>` +
+      `<span class="num">${r.heapMB.toFixed(0)} MB</span>${alloc(r, fmtAllocs(r.allocsPerReq))}${alloc(r, fmtSize(r.bytesPerReq))}` +
+      `<span class="num">${r.conns}</span><span class="num">${r.errs}</span>` +
       `<span class="tags"${r.ok ? "" : ' style="color:var(--hyper)"'}>${why}</span>`;
     return el;
   });
@@ -731,7 +749,7 @@ function renderTrouble() {
   const kinds = S.errKinds.map((k, i) => t.errRates[i] > 0 ? `${k} <b>${rate(t.errRates[i])}</b>` : null).filter(Boolean);
   e.querySelector(".lines").innerHTML = (kinds.length ? kinds.join(" · ") : "none in the last tick") +
     `<br>total <b>${t.errTotal.toLocaleString("en")}</b> since this engine started` +
-    (S.config.workload === "order" ? `<br>out of order <b style="color:${t.disorder ? "var(--hyper)" : "var(--lime)"}">${t.disorder.toLocaleString("en")}</b> replies` : "") +
+    (workload().checksOrder ? `<br>out of order <b style="color:${t.disorder ? "var(--hyper)" : "var(--lime)"}">${t.disorder.toLocaleString("en")}</b> replies` : "") +
     (t.lastErr ? `<br><span class="err" style="color:var(--hyper)">last: ${t.lastErr.replace(/[<>&]/g, "")}</span>` : "");
 
   const b = $("t-blocked"), pooled = S.engine === 0;

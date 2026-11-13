@@ -6,45 +6,19 @@ import (
 	"time"
 )
 
-// Workload is what one request does.
-type Workload string
-
-const (
-	WGet       Workload = "get"       // one GET
-	WSet       Workload = "set"       // one SET
-	WMix       Workload = "mix"       // GET or SET, WritePct% SETs
-	WRateLimit Workload = "ratelimit" // INCRBY + EXPIRE NX: two commands, known together
-	WCacheFill Workload = "cachefill" // GET, then SET a value built from it: the SET needs the GET reply
-	WPage      Workload = "page"      // a page: FanOut independent GETs and app work; async sends all, works, waits once
-	WOrder     Workload = "order"     // INCR on the caller's own key: every reply must be the last + 1
-)
-
-var workloads = []struct {
-	ID   Workload `json:"id"`
-	Name string   `json:"name"`
-	Note string   `json:"note"`
-}{
-	{WGet, "GET", "one GET per request"},
-	{WSet, "SET", "one SET per request"},
-	{WMix, "GET / SET mix", "a SET for the write share, else a GET"},
-	{WCacheFill, "cache fill", "GET, then SET: the SET needs the GET reply; async does not wait for the SET"},
-	{WPage, "page render", "a page needs N keys and some app work. Blocking: one GET after the other, N round trips, then the work. Async: send all N, do the work while they travel, wait once"},
-	{WOrder, "ordering check", "INCR on each caller's own key: a reply that is not the last + 1 came back out of order"},
-}
-
 // config is everything you can change besides the engine, the road, the callers
 // and the requests in flight. Engine options only apply to their engine.
 type config struct {
-	Workload  Workload `json:"workload"`
-	WritePct  int      `json:"writePct"`  // WMix: 0-100
-	ValueSize int      `json:"valueSize"` // bytes
-	Keys      int      `json:"keys"`
-	FanOut    int      `json:"fanOut"`   // WPage: keys per page
-	WorkUs    int      `json:"workUs"`   // WPage: app work per page, µs
-	SlowMs    int      `json:"slowMs"`   // a request slower than this counts as delayed; 0 = auto, 2 round trips + 1 ms
-	OTel      bool     `json:"otel"`     // go-redis OpenTelemetry metrics (otel.go) on the engine
-	OpenRate  int      `json:"openRate"` // open loop: target requests/s, scheduled; 0 = closed loop (each caller waits for its reply)
-	ZeroCopy  bool     `json:"zeroCopy"` // WGet, WMix: GetToBuffer into a buffer per request in flight, instead of Get
+	Workload  string `json:"workload"`  // a registered workload's ID (workloads.go)
+	WritePct  int    `json:"writePct"`  // mix: 0-100
+	ValueSize int    `json:"valueSize"` // bytes
+	Keys      int    `json:"keys"`
+	FanOut    int    `json:"fanOut"`   // page: keys per page
+	WorkUs    int    `json:"workUs"`   // page: app work per page, µs
+	SlowMs    int    `json:"slowMs"`   // a request slower than this counts as delayed; 0 = auto, 2 round trips + 1 ms
+	OTel      bool   `json:"otel"`     // go-redis OpenTelemetry metrics (otel.go) on the engine
+	OpenRate  int    `json:"openRate"` // open loop: target requests/s, scheduled; 0 = closed loop (each caller waits for its reply)
+	ZeroCopy  bool   `json:"zeroCopy"` // workloads with ZeroCopy (get, mix): GetToBuffer into a buffer per request in flight, instead of Get
 
 	// pool (redis.Options)
 	PoolSize     int  `json:"poolSize"`
@@ -79,7 +53,7 @@ type config struct {
 const maxSeedBytes = 256 << 20 // keys x value size; the demo seeds every key
 
 func defaultConfig() config {
-	return config{Workload: WGet, WritePct: 20, ValueSize: 32, Keys: 1000, FanOut: 10, WorkUs: 1000,
+	return config{Workload: defaultWorkload, WritePct: 20, ValueSize: 32, Keys: 1000, FanOut: 10, WorkUs: 1000,
 		PoolSize: poolSize, NumShards: 1, BatchShards: 1, MaxConcurrentBatches: 1}
 }
 
@@ -88,12 +62,8 @@ func clampInt(v, lo, hi int) int { return min(max(v, lo), hi) }
 // clamp keeps every field in range; it never fails, so a bad request cannot
 // stop the demo.
 func (c config) clamp() config {
-	ok := false
-	for _, w := range workloads {
-		ok = ok || w.ID == c.Workload
-	}
-	if !ok {
-		c.Workload = WGet
+	if workloadByID(c.Workload) == nil {
+		c.Workload = defaultWorkload
 	}
 	c.WritePct = clampInt(c.WritePct, 0, 100)
 	c.ValueSize = clampInt(c.ValueSize, 1, 1<<20)
@@ -127,8 +97,19 @@ func (c config) clamp() config {
 	return c
 }
 
+// workload is the selected workload; the default one for an unknown ID.
+func (c config) workload() Workload {
+	if w := workloadByID(c.Workload); w != nil {
+		return w
+	}
+	return workloadByID(defaultWorkload)
+}
+
+// workloadInfo is the selected workload's info under this config.
+func (c config) workloadInfo() WorkloadInfo { return workloadInfoFor(c.workload(), c) }
+
 // zeroCopy reports whether the GETs of this workload use GetToBuffer.
-func (c config) zeroCopy() bool { return c.ZeroCopy && (c.Workload == WGet || c.Workload == WMix) }
+func (c config) zeroCopy() bool { return c.ZeroCopy && c.workloadInfo().ZeroCopy }
 
 // maxBatchBytesCode is MaxBatchBytes as Go: "16 << 20" or "64 << 10".
 func (c config) maxBatchBytesCode() string {
@@ -141,13 +122,7 @@ func (c config) maxBatchBytesCode() string {
 // loadKey names the load, without engine options: the scoreboard compares
 // engines on the same load.
 func (c config) loadKey() string {
-	k := fmt.Sprintf("%s %dB %dkeys", c.Workload, c.ValueSize, c.Keys)
-	switch c.Workload {
-	case WMix:
-		k += fmt.Sprintf(" %d%%w", c.WritePct)
-	case WPage:
-		k += fmt.Sprintf(" fan%d work%dus", c.FanOut, c.WorkUs)
-	}
+	k := fmt.Sprintf("%s %dB %dkeys", c.Workload, c.ValueSize, c.Keys) + c.workloadInfo().LoadKey
 	if c.OpenRate > 0 {
 		k += fmt.Sprintf(" open%d", c.OpenRate)
 	}
@@ -302,17 +277,6 @@ func join(a, b string) string {
 	return a + ", " + b
 }
 
-// commandsPerRequest is how many commands one request sends, for the server count.
-func (c config) commandsPerRequest() int {
-	switch c.Workload {
-	case WRateLimit, WCacheFill:
-		return 2
-	case WPage:
-		return c.FanOut
-	}
-	return 1
-}
-
 func (c config) work() time.Duration { return time.Duration(c.WorkUs) * time.Microsecond }
 
 // slowAt is the delayed threshold: the setting, or 2 round trips + 1 ms.
@@ -346,12 +310,11 @@ func (c config) pipelinePoolSize() int {
 // the CPU and the server, so a measured number at or below it is plausible and
 // one above it is wrong. 0 when the road adds nothing (+0: CPU decides).
 //
-// Round trips per request: one, except two on the blocking faces for the rate
-// limiter (INCRBY waits, then EXPIRE) and the cache fill (GET, then SET), and
-// FanOut for the page. The async face sends both rate-limiter commands, and
-// all the page's GETs, at once, and does not wait for the cache fill's SET.
-// The page's app work: after the replies on the blocking faces; on the async
-// face it runs while the GETs are on the road.
+// Round trips per request: the workload's Trips on the blocking faces (two for
+// the cache fill, GET then SET; FanOut for the page), one on the async face:
+// it sends a request's commands at once and does not wait for the cache
+// fill's SET. The workload's app work: after the replies on the blocking
+// faces; on the async face it runs while the commands are on the road.
 func (c config) ceiling(e Engine, callers, window int, rtt time.Duration) float64 {
 	if rtt <= 0 {
 		return 0
@@ -366,16 +329,14 @@ func (c config) ceiling(e Engine, callers, window int, rtt time.Duration) float6
 			inFlight = float64(min(callers, c.PoolSize, c.MaxActive))
 		}
 	}
+	info := c.workloadInfo()
 	trips := 1.0
-	if !e.Async() && (c.Workload == WRateLimit || c.Workload == WCacheFill) {
-		trips = 2
-	}
-	if !e.Async() && c.Workload == WPage {
-		trips = float64(c.FanOut) // one GET after the other
+	if !e.Async() {
+		trips = float64(max(info.Trips, 1)) // one command after the other
 	}
 	perWindow := trips * rtt.Seconds()
-	if c.Workload == WPage {
-		work := c.work().Seconds() * float64(window)
+	if info.Work > 0 {
+		work := info.Work.Seconds() * float64(window)
 		if e.Async() {
 			perWindow = max(perWindow, work)
 		} else {

@@ -11,7 +11,7 @@ import (
 
 // The finder runs every engine and its main mechanisms one after another, on
 // the current road, workload, callers (or open-loop rate) and options, then
-// names the best setup for latency, CPU, memory and throughput. It takes over
+// names the best setup for latency, CPU, memory, allocations and throughput. It takes over
 // the engine, in-flight, pipes and batching connections settings while it runs
 // and puts them back.
 
@@ -77,6 +77,11 @@ type findResult struct {
 	Disorder int64   `json:"disorder"` // ordering check: replies out of order
 	KeptUp   bool    `json:"keptUp"`   // open loop: on schedule; closed loop: always true
 	Ok       bool    `json:"ok"`       // no errors and kept up: it can be the best
+
+	// heap allocations and bytes per request over the measurement (process-wide)
+	AllocsPerReq float64 `json:"allocsPerReq"`
+	BytesPerReq  float64 `json:"bytesPerReq"`
+	AllocLowRate bool    `json:"allocLowRate"`
 }
 
 type finderView struct {
@@ -86,7 +91,7 @@ type finderView struct {
 	Current string         `json:"current"`
 	Load    string         `json:"load"` // what it ran on
 	Results []findResult   `json:"results"`
-	Best    map[string]int `json:"best"` // "p99", "cpu", "mem", "rate": index into Results
+	Best    map[string]int `json:"best"` // "p99", "cpu", "mem", "allocs", "rate": index into Results
 	Note    string         `json:"note"`
 }
 
@@ -213,8 +218,8 @@ func (d *demo) runFinder(ctx context.Context, cands []findCand, engine Engine, w
 	v.Note = note
 	d.find.cancel = nil
 	if len(v.Best) > 0 {
-		msg := fmt.Sprintf("finder: lowest p99 %s, least CPU %s, least memory %s",
-			v.Results[v.Best["p99"]].Label, v.Results[v.Best["cpu"]].Label, v.Results[v.Best["mem"]].Label)
+		msg := fmt.Sprintf("finder: lowest p99 %s, least CPU %s, least memory %s, fewest allocations %s",
+			v.Results[v.Best["p99"]].Label, v.Results[v.Best["cpu"]].Label, v.Results[v.Best["mem"]].Label, v.Results[v.Best["allocs"]].Label)
 		if i, ok := v.Best["rate"]; ok {
 			msg += ", most req/s " + v.Results[i].Label
 		}
@@ -256,8 +261,9 @@ func (d *demo) measureFind(ctx context.Context, c findCand) (findResult, bool) {
 	defer d.mu.Unlock()
 	b := d.board[sc]
 	r := findResult{Label: c.label, Engine: int(c.engine), Rate: b.rate, P50ms: ms(b.p50), P99ms: ms(b.p99),
+		AllocsPerReq: b.allocsPerReq, BytesPerReq: b.bytesPerReq, AllocLowRate: b.allocLowRate,
 		Conns: d.last.conns, Errs: d.last.errs, KeptUp: true}
-	if d.cfg.Workload == WOrder {
+	if d.cfg.workloadInfo().ChecksOrder {
 		r.Disorder = d.trouble.Disorder // since this setup's engine started
 	}
 	if n > 0 {
@@ -309,6 +315,12 @@ func bestOf(rs []findResult, openLoop bool) map[string]int {
 	best["mem"] = pick(func(a, b findResult) bool {
 		if a.HeapMB != b.HeapMB {
 			return a.HeapMB < b.HeapMB
+		}
+		return a.P99ms < b.P99ms
+	})
+	best["allocs"] = pick(func(a, b findResult) bool {
+		if a.AllocsPerReq != b.AllocsPerReq {
+			return a.AllocsPerReq < b.AllocsPerReq
 		}
 		return a.P99ms < b.P99ms
 	})

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"net"
+	rtm "runtime/metrics"
 	"sort"
 	"strconv"
 	"strings"
@@ -205,6 +206,78 @@ func (m *cpuMeter) delta() (time.Duration, time.Duration) {
 	}
 	m.last, m.lastAt = used, now
 	return cpu, wall
+}
+
+// rtMeter reads the Go runtime's own counters with runtime/metrics, which does
+// not stop the world (runtime.ReadMemStats does). Process-wide: the engine,
+// the road proxy and the demo's stats and web code together.
+type rtMeter struct {
+	s    []rtm.Sample
+	last rtDelta // the cumulative counters at the last read
+	ok   bool    // last is set
+}
+
+// rtDelta is what the runtime counted over one interval.
+type rtDelta struct {
+	objs, bytes   uint64  // heap allocations, tiny ones included, and their bytes
+	gcCPU, useCPU float64 // CPU seconds in GC, and in all Go code (total minus idle)
+}
+
+func (a rtDelta) add(b rtDelta) rtDelta {
+	return rtDelta{a.objs + b.objs, a.bytes + b.bytes, a.gcCPU + b.gcCPU, a.useCPU + b.useCPU}
+}
+
+// gcPct is the share of the CPU the process's Go code used that went to GC.
+// The runtime updates these CPU counters at GC cycles, so a window without a
+// GC shows 0.
+func (a rtDelta) gcPct() float64 {
+	if a.useCPU <= 0 {
+		return 0
+	}
+	return 100 * a.gcCPU / a.useCPU
+}
+
+var rtNames = []string{
+	"/gc/heap/allocs:objects",
+	"/gc/heap/tiny/allocs:objects",
+	"/gc/heap/allocs:bytes",
+	"/cpu/classes/gc/total:cpu-seconds",
+	"/cpu/classes/total:cpu-seconds",
+	"/cpu/classes/idle:cpu-seconds",
+	"/memory/classes/heap/objects:bytes",
+	"/memory/classes/heap/unused:bytes",
+	"/memory/classes/total:bytes",
+}
+
+// read returns what the runtime counted since the last call, the bytes in
+// heap objects now (live, and dead not yet swept), the heap in use
+// (MemStats.HeapInuse) and what the runtime holds from the OS (MemStats.Sys).
+func (m *rtMeter) read() (d rtDelta, objBytes, inuse, sys uint64) {
+	if m.s == nil {
+		m.s = make([]rtm.Sample, len(rtNames))
+		for i, n := range rtNames {
+			m.s[i].Name = n
+		}
+	}
+	rtm.Read(m.s)
+	u := func(i int) uint64 {
+		if m.s[i].Value.Kind() != rtm.KindUint64 {
+			return 0
+		}
+		return m.s[i].Value.Uint64()
+	}
+	f := func(i int) float64 {
+		if m.s[i].Value.Kind() != rtm.KindFloat64 {
+			return 0
+		}
+		return m.s[i].Value.Float64()
+	}
+	now := rtDelta{objs: u(0) + u(1), bytes: u(2), gcCPU: f(3), useCPU: f(4) - f(5)}
+	if m.ok {
+		d = rtDelta{now.objs - m.last.objs, now.bytes - m.last.bytes, now.gcCPU - m.last.gcCPU, now.useCPU - m.last.useCPU}
+	}
+	m.last, m.ok = now, true
+	return d, u(6), u(6) + u(7), u(8)
 }
 
 func (m *cpuMeter) cores() float64 {

@@ -43,6 +43,13 @@ type kpi struct {
 	Warming    bool    `json:"warming"`
 	Errs       int64   `json:"errs"`
 	LastErr    string  `json:"lastErr"`
+
+	// runtime/metrics, process-wide: per request completed in the window
+	AllocsPerReq float64 `json:"allocsPerReq"`
+	BytesPerReq  float64 `json:"bytesPerReq"`
+	GCPct        float64 `json:"gcPct"`        // GC share of the CPU the Go code used
+	PeakHeapMB   float64 `json:"peakHeapMB"`   // most heap object bytes since the warm-up ended
+	AllocLowRate bool    `json:"allocLowRate"` // too few requests: the per-request numbers are not reliable
 }
 
 type point struct {
@@ -65,6 +72,10 @@ type boardRow struct {
 	MostRate  bool    `json:"mostRate"`
 	LowestP99 bool    `json:"lowestP99"`
 	Failed    string  `json:"failed"` // why it cannot win: "errors", "out of order"; "" when clean
+
+	// heap allocations per request over the whole run (process-wide)
+	AllocsPerReq float64 `json:"allocsPerReq"`
+	AllocLowRate bool    `json:"allocLowRate"`
 }
 
 // roadInfo is the client's cores.
@@ -127,12 +138,14 @@ func (d *demo) snapshot() snapshot {
 	s := snapshot{
 		Engine: int(d.engine), RTTms: ms(d.rtt), MeasuredRTTms: ms(d.last.measuredRTT),
 		Callers: d.callers, CallerSteps: callerSteps, Window: d.window, WindowSteps: windowSteps,
-		TickMs: int(tick / time.Millisecond), Config: d.cfg, Workloads: workloads,
+		TickMs: int(tick / time.Millisecond), Config: d.cfg, Workloads: workloadInfos(d.cfg),
 		Conn: d.connInfo(), GoRedis: goRedisVersion(), Trouble: d.trouble, OTel: d.otelV, Finder: d.find.view.snapshot(), ErrKinds: errKindNames[:],
 		Features: features{PipesField: pipesField, PipeMinIdle: hasPipeMinIdle},
 		Road:     roadInfo{Cores: runtime.GOMAXPROCS(0), CoresMax: runtime.NumCPU()},
 		Now: kpi{Rate: d.last.rate, ServerRate: d.last.serverRate, P50ms: ms(d.last.p50), P99ms: ms(d.last.p99),
-			Conns: d.last.conns, Spares: d.last.spares, Ceiling: d.last.ceiling, HeapMB: d.last.heapMB, SysMB: d.last.sysMB, Cores: d.last.cores, Warming: d.last.warming, Errs: d.last.errs, LastErr: d.last.lastErr},
+			Conns: d.last.conns, Spares: d.last.spares, Ceiling: d.last.ceiling, HeapMB: d.last.heapMB, SysMB: d.last.sysMB, Cores: d.last.cores,
+			AllocsPerReq: d.last.allocsPerReq, BytesPerReq: d.last.bytesPerReq, GCPct: d.last.gcPct, PeakHeapMB: d.last.peakHeapMB, AllocLowRate: d.last.allocLowRate,
+			Warming: d.last.warming, Errs: d.last.errs, LastErr: d.last.lastErr},
 		// never null in JSON: the page reads .length on all of them
 		History: []point{}, Board: []boardRow{}, Events: []string{},
 	}
@@ -169,11 +182,11 @@ func (d *demo) snapshot() snapshot {
 		switch {
 		case m.errs > 0:
 			failed = "errors"
-		case d.cfg.Workload == WOrder && m.disorder > 0:
+		case d.cfg.workloadInfo().ChecksOrder && m.disorder > 0:
 			failed = "out of order"
 		}
 		s.Board = append(s.Board, boardRow{Engine: int(sc.engine), Name: name, Rate: m.rate, P99ms: ms(m.p99), Conns: m.conns,
-			RunS: m.span.Seconds(), Failed: failed})
+			RunS: m.span.Seconds(), AllocsPerReq: m.allocsPerReq, AllocLowRate: m.allocLowRate, Failed: failed})
 		if failed != "" {
 			continue // a failing scenario cannot be the best
 		}

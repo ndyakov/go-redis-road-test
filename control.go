@@ -116,7 +116,9 @@ func (d *demo) setConfig(c config) {
 	old := d.cfg
 	d.cfg = c
 	d.mu.Unlock()
-	if c.Keys != old.Keys || c.ValueSize != old.ValueSize {
+	reseed := c.Keys != old.Keys || c.ValueSize != old.ValueSize
+	_, seeder := c.workload().(Seeder)
+	if reseed || seeder {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 		d.mu.Lock()
@@ -124,9 +126,18 @@ func (d *demo) setConfig(c config) {
 			d.run.stop()
 			d.run = nil
 		}
-		d.event("seeding %d keys x %d B", c.Keys, c.ValueSize)
+		if reseed {
+			d.event("seeding %d keys x %d B", c.Keys, c.ValueSize)
+		}
 		d.mu.Unlock()
-		if err := d.stats.seed(ctx, c.Keys, c.ValueSize); err != nil {
+		if reseed {
+			if err := d.stats.seed(ctx, c.Keys, c.ValueSize); err != nil {
+				d.mu.Lock()
+				d.event("ERROR seed: %v", err)
+				d.mu.Unlock()
+			}
+		}
+		if err := d.seedWorkload(ctx, d.stats, c); err != nil {
 			d.mu.Lock()
 			d.event("ERROR seed: %v", err)
 			d.mu.Unlock()
@@ -178,11 +189,32 @@ func (d *demo) connect(host string, port int, user, pass string) error {
 	cfg := d.cfg
 	d.mu.Unlock()
 	old.Close()
-	if err := st.seed(ctx, cfg.Keys, cfg.ValueSize); err != nil {
+	err = st.seed(ctx, cfg.Keys, cfg.ValueSize)
+	if err == nil {
+		err = d.seedWorkload(ctx, st, cfg)
+	}
+	if err != nil {
 		d.mu.Lock()
 		d.connErr = fmt.Errorf("seed: %w", err)
 		d.mu.Unlock()
 		return d.connErr
 	}
 	return d.restart('1')
+}
+
+// seedWorkload runs the workload's Seed, if it has one (workloads.go), on the
+// admin client, and logs how long it took. The load must be stopped.
+func (d *demo) seedWorkload(ctx context.Context, st *serverStats, cfg config) error {
+	s, ok := cfg.workload().(Seeder)
+	if !ok {
+		return nil
+	}
+	start := time.Now()
+	if err := s.Seed(ctx, st.admin, cfg); err != nil {
+		return fmt.Errorf("%s: %w", cfg.Workload, err)
+	}
+	d.mu.Lock()
+	d.event("%s: seed checked in %s", cfg.Workload, time.Since(start).Round(time.Microsecond))
+	d.mu.Unlock()
+	return nil
 }

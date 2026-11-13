@@ -46,7 +46,15 @@ type commands interface {
 	IncrBy(ctx context.Context, key string, value int64) *redis.IntCmd
 	ExpireNX(ctx context.Context, key string, expiration time.Duration) *redis.BoolCmd
 	BLPop(ctx context.Context, timeout time.Duration, keys ...string) *redis.StringSliceCmd
+	HSet(ctx context.Context, key string, values ...interface{}) *redis.IntCmd
+	HGet(ctx context.Context, key, field string) *redis.StringCmd
+	HMGet(ctx context.Context, key string, fields ...string) *redis.SliceCmd
 }
+
+var (
+	_ commands = (*redis.Client)(nil)
+	_ commands = (*redis.AutoPipeliner)(nil)
+)
 
 // running is one engine under load.
 type running struct {
@@ -63,6 +71,8 @@ type running struct {
 	cmds     commands                  // what the callers use: the client or the autopipeliner (faults.go)
 	ctx      context.Context
 	disorder atomic.Int64 // ordering check: replies that were not the last + 1
+	workload Workload     // what each request does (workloads.go)
+	info     WorkloadInfo // its info under cfg
 	lagNs    atomic.Int64 // open loop: how far behind its schedule the slowest caller is
 	inFlight atomic.Int64 // requests started, not finished
 	callers  int
@@ -116,7 +126,11 @@ func startEngine(addr string, auth target, e Engine, callers, window int, cfg co
 	opt.ConnMaxLifetime = time.Duration(cfg.ConnLifetimeMs) * time.Millisecond
 	opt.DisableIdentity = cfg.DisableIdentity
 	rdb := redis.NewClient(opt)
-	r := &running{engine: e, cfg: cfg, rdb: rdb, hist: hist, value: make([]byte, cfg.ValueSize)}
+	w := cfg.workload()
+	r := &running{
+		engine: e, cfg: cfg, rdb: rdb, hist: hist, value: make([]byte, cfg.ValueSize),
+		workload: w, info: workloadInfoFor(w, cfg),
+	}
 	for i := range r.value {
 		r.value[i] = 'v'
 	}
@@ -186,14 +200,15 @@ func startEngine(addr string, auth target, e Engine, callers, window int, cfg co
 	return r, nil
 }
 
-// caller keeps window requests in flight. On the async face it starts the
-// first command of every request, then finishes each one; on the blocking
-// faces window is 1 and every call waits for its reply.
+// caller keeps window requests in flight. On the async face it starts every
+// request of the window, then finishes each one; on the blocking faces window
+// is 1 and every call waits for its reply. What a request does is the
+// workload's (workloads.go).
 func (r *running) caller(ctx context.Context, c commands, id, window int) {
 	defer r.wg.Done()
-	cfg, async := r.cfg, r.engine.Async()
+	cfg := r.cfg
+	work := r.info.Work
 	n := id * 7
-	rnd := uint64(id)*0x9E3779B97F4A7C15 + 1
 	starts := make([]time.Time, window)
 	keys := make([]string, window)
 	// open loop: each caller keeps a schedule of cfg.OpenRate / callers requests/s
@@ -204,25 +219,18 @@ func (r *running) caller(ctx context.Context, c commands, id, window int) {
 		interval = time.Duration(float64(time.Second) * float64(r.callers) / float64(cfg.OpenRate))
 		next = next.Add(interval * time.Duration(id) / time.Duration(max(r.callers, 1))) // spread the callers
 	}
-	orderKey := fmt.Sprintf("demo:seq:%s:%d", clientName, id)
-	var lastSeq int64
-	first := make([][]redis.Cmder, window)
-	var unawaited, previous []redis.Cmder // async cache fill: the SETs nobody waits for
+	env := &CallerEnv{Cmds: c, Config: cfg, Value: r.value, Async: r.engine.Async(), ID: id, Window: window, disorder: &r.disorder}
 	// zero copy: one buffer per request in flight, value size + 2 for the
 	// fast path that reads the payload and its CRLF in one read
-	var bufs [][]byte
 	if cfg.zeroCopy() {
-		bufs = make([][]byte, window)
-		for i := range bufs {
-			bufs[i] = make([]byte, cfg.ValueSize+2)
+		env.bufs = make([][]byte, window)
+		for i := range env.bufs {
+			env.bufs[i] = make([]byte, cfg.ValueSize+2)
 		}
 	}
-	get := func(i int, k string) redis.Cmder {
-		if bufs != nil {
-			return c.GetToBuffer(ctx, k, bufs[i])
-		}
-		return c.Get(ctx, k)
-	}
+	wc := r.workload.NewCaller(env)
+	first := make([][]redis.Cmder, window)
+	var unawaited, previous []redis.Cmder // fire-and-forget commands (async cache fill: the SETs nobody waits for)
 	fail := func(err error) bool {
 		if ctx.Err() != nil {
 			return true
@@ -253,39 +261,10 @@ func (r *running) caller(ctx context.Context, c commands, id, window int) {
 			if interval > 0 {
 				starts[i] = scheduled
 			}
-			switch cfg.Workload {
-			case WSet:
-				first[i] = []redis.Cmder{c.Set(ctx, k, r.value, 0)}
-			case WMix:
-				rnd ^= rnd << 13
-				rnd ^= rnd >> 7
-				rnd ^= rnd << 17
-				if int(rnd%100) < cfg.WritePct {
-					first[i] = []redis.Cmder{c.Set(ctx, k, r.value, 0)}
-				} else {
-					first[i] = []redis.Cmder{get(i, k)}
-				}
-			case WGet:
-				first[i] = []redis.Cmder{get(i, k)}
-			case WOrder:
-				first[i] = []redis.Cmder{c.IncrBy(ctx, orderKey, 1)}
-			case WRateLimit:
-				rk := "demo:rl:" + k
-				first[i] = []redis.Cmder{c.IncrBy(ctx, rk, 1), c.ExpireNX(ctx, rk, time.Minute)}
-			case WPage:
-				// the page's keys; on the blocking faces each GET waits for its reply
-				page := first[i][:0]
-				for j := 0; j < cfg.FanOut; j++ {
-					page = append(page, c.Get(ctx, key((n+j)%cfg.Keys)))
-				}
-				n += cfg.FanOut - 1
-				first[i] = page
-			default: // WCacheFill: a plain GET, its reply is the SET's value
-				first[i] = []redis.Cmder{c.Get(ctx, k)}
-			}
+			first[i] = wc.Start(ctx, i, k)
 		}
-		// the previous window's fire-and-forget SETs: checked only now, after this
-		// window is on the road, so nobody waits for them
+		// the previous window's fire-and-forget commands: checked only now, after
+		// this window is on the road, so nobody waits for them
 		for _, cmd := range previous {
 			if e := cmd.Err(); e != nil && fail(e) {
 				return
@@ -293,8 +272,8 @@ func (r *running) caller(ctx context.Context, c commands, id, window int) {
 		}
 		previous = previous[:0]
 		// 2. app work while the requests are on the road (async), or after the replies (blocking)
-		if cfg.Workload == WPage && cfg.WorkUs > 0 {
-			time.Sleep(cfg.work() * time.Duration(window)) // the work of every request in the window
+		if work > 0 {
+			time.Sleep(work * time.Duration(window)) // the work of every request in the window
 		}
 		// 3. finish each request
 		for i := 0; i < window; i++ {
@@ -304,6 +283,10 @@ func (r *running) caller(ctx context.Context, c commands, id, window int) {
 					err = e
 				}
 			}
+			var later []redis.Cmder
+			if err == nil {
+				later, err = wc.Finish(ctx, i, keys[i], first[i])
+			}
 			if err != nil {
 				r.inFlight.Add(-1)
 				if fail(err) {
@@ -311,30 +294,7 @@ func (r *running) caller(ctx context.Context, c commands, id, window int) {
 				}
 				continue
 			}
-			if cfg.Workload == WOrder {
-				// replies are read in submit order: in order, each is the last + 1
-				v := first[i][0].(*redis.IntCmd).Val()
-				if lastSeq != 0 && v != lastSeq+1 {
-					r.disorder.Add(1)
-				}
-				lastSeq = v
-			}
-			if cfg.Workload == WCacheFill {
-				// the page for the key just read, built from the GET's reply: this
-				// SET cannot be sent before that reply is back, so no pipeline can
-				// merge the two
-				page := first[i][0].(*redis.StringCmd).Val()
-				set := c.Set(ctx, "demo:page:"+keys[i], page, time.Minute)
-				if async {
-					unawaited = append(unawaited, set) // the request is done; the SET finishes on its own
-				} else if e := set.Err(); e != nil { // the blocking face waits for the SET: two trips
-					r.inFlight.Add(-1)
-					if fail(e) {
-						return
-					}
-					continue
-				}
-			}
+			unawaited = append(unawaited, later...)
 			r.hist.record(time.Since(starts[i]))
 			r.inFlight.Add(-1)
 		}
@@ -383,6 +343,7 @@ func (h *liveHist) record(d time.Duration) {
 type window struct {
 	counts [histBuckets]uint64
 	span   time.Duration
+	allocs rtDelta // what the Go runtime counted over the same interval (stats.go)
 }
 
 func (h *liveHist) snapshot(span time.Duration) window {
@@ -399,6 +360,7 @@ func merge(ws []window) window {
 	var m window
 	for _, w := range ws {
 		m.span += w.span
+		m.allocs = m.allocs.add(w.allocs)
 		for i, c := range w.counts {
 			m.counts[i] += c
 		}
@@ -419,6 +381,27 @@ func (w window) rate() float64 {
 		return 0
 	}
 	return float64(w.total()) / w.span.Seconds()
+}
+
+// lowAllocRate is the request rate under which the per-request allocation
+// numbers are not reliable: the runtime counts the whole process, so the road
+// proxy and the demo's own stats and web code weigh in.
+const lowAllocRate = 500 // per second: 1000 in the 2 s window
+
+// allocsPerReq is heap allocations per request completed, tiny ones included.
+func (w window) allocsPerReq() float64 { return perReq(float64(w.allocs.objs), w.total()) }
+
+// bytesPerReq is heap bytes allocated per request completed.
+func (w window) bytesPerReq() float64 { return perReq(float64(w.allocs.bytes), w.total()) }
+
+// allocLowRate says the per-request numbers are not reliable (lowAllocRate).
+func (w window) allocLowRate() bool { return w.rate() < lowAllocRate }
+
+func perReq(v float64, n uint64) float64 {
+	if n == 0 {
+		return 0
+	}
+	return v / float64(n)
 }
 
 // quantile returns the upper edge of the bucket that holds quantile q.

@@ -92,8 +92,8 @@ REDIS_PASSWORD=... go run . --web 127.0.0.1:8080 --user default # with a passwor
 The password is read only from `REDIS_PASSWORD` (a flag would show in `ps`), or typed in the browser
 UI; the page never gets it back.
 
-**What the demo does to that Redis:** it writes keys named `demo:key:*`, `demo:rl:*` and
-`demo:page:*`, and puts heavy load on it. It never runs `FLUSHDB` or deletes other keys. Do not point
+**What the demo does to that Redis:** it writes keys named `demo:key:*`, `demo:rl:*`,
+`demo:page:*` and `demo:row:*`, and puts heavy load on it. It never runs `FLUSHDB` or deletes other keys. Do not point
 it at a Redis that other people or test runs depend on.
 
 For a Redis of its own, there is a container:
@@ -159,13 +159,14 @@ in an (i) tooltip. `?open` opens every drawer, for screenshots.
 
 | Experiment | What it does | What it showed (laptop, +2 ms, 256 callers unless noted) |
 |------------|--------------|-----------------------------------------------------------|
-| Find the best setup | one button: the blocking faces (pool, batching with 1, 2 and 4 connections, full duplex with 1, 2 and 4 pipes, full duplex with MaxFlushDelay 250 µs) and the async faces with one request in flight (batching async x1, full duplex async x1 with 1 and 2 pipes and with delay 250 and 500 µs: a request's own commands still go out together, as in the rate limiter and the page). With "more in flight per caller" checked (remembered) also batching async x2, x4, x8 and full duplex async x2, x4, x4 with 2 pipes, x4 with delay 250 µs, x8, x8 with 2 pipes: 13 or 22 setups. The delay setups override the Options delay; the others keep it. Leave it off when your app cannot keep several requests in flight per caller on the current road, workload, callers or open-loop rate, 4 s each after warm-up. A table with req/s, p50, p99, CPU seconds per million requests, heap, connections and errors, and the best for p99, CPU, memory and req/s. A setup with errors, or behind schedule in open loop, cannot win; ties go to more req/s (p99) or lower p99 (the rest). Before each setup's warm-up it collects the last setup's garbage and returns it to the OS, so each starts from the same heap. It takes over the engine, in flight, pipes and batching connections and puts them back; the client options stay as set | +2 ms, 64 callers, GET: most req/s full duplex async x64 (1.05M, p99 5.4 ms), lowest p99 full duplex async x8 (4.0 ms at 217k), least CPU batching async x64 (2.4 CPU-s per 1M), least memory full duplex (8 MB) |
+| Find the best setup | one button: the blocking faces (pool, batching with 1, 2 and 4 connections, full duplex with 1, 2 and 4 pipes, full duplex with MaxFlushDelay 250 µs) and the async faces with one request in flight (batching async x1, full duplex async x1 with 1 and 2 pipes and with delay 250 and 500 µs: a request's own commands still go out together, as in the rate limiter and the page). With "more in flight per caller" checked (remembered) also batching async x2, x4, x8 and full duplex async x2, x4, x4 with 2 pipes, x4 with delay 250 µs, x8, x8 with 2 pipes: 13 or 22 setups. The delay setups override the Options delay; the others keep it. Leave it off when your app cannot keep several requests in flight per caller on the current road, workload, callers or open-loop rate, 4 s each after warm-up. A table with req/s, p50, p99, CPU seconds per million requests, heap, allocs/req, B/req, connections and errors, and the best for p99, CPU, memory, allocations and req/s. A setup with errors, or behind schedule in open loop, cannot win; ties go to more req/s (p99) or lower p99 (the rest). Before each setup's warm-up it collects the last setup's garbage and returns it to the OS, so each starts from the same heap. It takes over the engine, in flight, pipes and batching connections and puts them back; the client options stay as set | +2 ms, 64 callers, GET: most req/s full duplex async x64 (1.05M, p99 5.4 ms), lowest p99 full duplex async x8 (4.0 ms at 217k), least CPU batching async x64 (2.4 CPU-s per 1M), least memory full duplex (8 MB) |
 | Open loop | requests are scheduled at a target rate; latency starts at the scheduled time. When the client falls more than 100 ms behind, the status line and the delayed card say "open loop: N behind schedule" in red | 50k/s target: 50,002/s, p99 4.2 ms. 2M/s target (over the 110k this setup can do): the schedule falls behind, p50 3.5 s. Closed loop would have shown a lower rate and a good p99 |
 | Client cores | `GOMAXPROCS` | full duplex async x8, MaxFlushDelay 250 µs vs off. 1 core: +59% at +0 (956k vs 600k), +23% at +2 ms. 14 cores: +4 to +9%, about noise: with spare cores the writer already sends full batches |
 | Faults | kill the engine's connections; big replies through the engine (1 MB, 10 MB, 10 MB x10 at once, 50 MB, 1 MB x100 at once); a 2 s BLPOP | kills: no errors, go-redis retries and reconnects. Big replies: the event line gives the fastest, median and slowest GET; the p99 chart shows what the other requests waited. 10 MB x10: pool 81 to 550 ms, full duplex 51 to 484 ms. BLPOP: full duplex runs it on a second connection |
 | Errors in the events log | new errors, and new out-of-order replies in the ordering check, as an ERROR line: how many since the last line and the last error, at most every 2 s | pool with MaxActiveConns 10 below PoolSize: "ERROR 13091 new errors, last: redis: connection pool exhausted" |
 | Ordering check (workload) | each caller INCRs its own key; a reply that is not the last + 1 is out of order. Shown on the errors card ("out of order: N" in red, or "all in order") and in the status line; such a scenario is marked ✕ on the scoreboard and in the finder and cannot be the best. Only the async faces with more than one in flight per caller and unordered batching (more than one batch at once) can reorder | async x8: unordered batching (4 at once) 1.7M out of order in 6 s; ordered batching, full duplex with 1 or 4 pipes: 0 |
 | Client memory | Go heap in use, and what the runtime holds from the OS, on the CPU card | full duplex about 10 MB heap, the 256-connection pool about 40 MB |
+| Client allocations | from Go's `runtime/metrics`, on the CPU card over the same 2 s as requests/s, warm-up left out: allocs/req (heap allocations, tiny ones included, per request completed), B/req (heap bytes allocated per request), GC (share of the Go CPU spent in the garbage collector) and peak heap (the most memory in heap objects since the engine or a setting last restarted). The scoreboard shows allocs/req over the whole run; the finder shows allocs/req and B/req and names the setup with the fewest allocations. These numbers count the whole process: the road proxy (it runs in the demo, unless `--direct`) and the demo's own stats and web code. Under 1000 requests in 2 s they show as "low rate". The `widerows` workload (issue #4299) uses them for B/op, allocs/op and peak retained memory | laptop, `--direct`, widerows on 100,000 rows (Redis at 100% CPU, about 28k req/s for every engine): about 247 allocs and 7.5 to 8.2 KB per HMGET on every engine, the same as one plain client in a loop (245, MemStats). What changes is the peak heap: full duplex async 64 callers 8 MB at x1, 38 MB at x64, 130 MB at x256; the 256-connection pool 43 MB. GET: pool 10 allocs and 330 B per request, full duplex async x8 9 and 470 B |
 | go-redis OpenTelemetry | off by default. On: `extra/redisotel-native` with an in-process `ManualReader`, read every tick: `db.client.operation.duration` (per second, mean, p50, p99), connection count by pool, pending requests, pool wait and dial times, errors, closed connections | the pool and full duplex record each command; batching records each batch as `PIPELINE`, with its size. Cost, 256 callers: pool about -4%, batching none, **full duplex 10x lower** (1.86M to 178k req/s at +0, async x64; 655k to 169k at +2 ms, x8). Cause: for every reply the full-duplex reader runs the metric callback inline, with `enterNodeDispatch` (`curGoroutineID`, which calls `runtime.Stack`), so the one reader goroutine is the limit. Fixed on go-redis master after v9.23.0 (PR #4269): the reader no longer pays that cost per reply. On v9.23.0, compare engines with OTel off |
 
 ### Browser UI: sliders and workloads
@@ -344,6 +345,94 @@ meant to.
 
 For numbers from dedicated machines, see the benchmarks behind the talk.
 
+## Add your own workload
+
+A workload is what one request does. Each built-in one (`workloads.go`) is a type that implements
+`Workload`, and you add your own the same way: drop a file next to `main.go` that registers it from
+an `init()`. This one writes a hash field and reads it back:
+
+```go
+package main
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+
+	"github.com/redis/go-redis/v9"
+)
+
+func init() { RegisterWorkload(hashWorkload{}) }
+
+// hashWorkload: HSET a field, then HGET it back, two commands known together.
+type hashWorkload struct{}
+
+func (hashWorkload) Info() WorkloadInfo {
+	return WorkloadInfo{
+		ID: "hash", Name: "HSET + HGET", Note: "HSET a field, then HGET it back",
+		Commands: 2, Trips: 2, // the blocking faces wait for each command: two round trips
+	}
+}
+
+func (hashWorkload) NewCaller(env *CallerEnv) Caller { return &hashCaller{env: env} }
+
+type hashCaller struct{ env *CallerEnv }
+
+func (c *hashCaller) Start(ctx context.Context, slot int, key string) []redis.Cmder {
+	hk := "demo:hash:" + key
+	return []redis.Cmder{c.env.Cmds.HSet(ctx, hk, "v", c.env.Value), c.env.Cmds.HGet(ctx, hk, "v")}
+}
+
+// Finish runs after both replies. A wrong value counts as a failed request.
+func (c *hashCaller) Finish(_ context.Context, _ int, key string, cmds []redis.Cmder) ([]redis.Cmder, error) {
+	got, err := cmds[1].(*redis.StringCmd).Bytes()
+	if err == nil && !bytes.Equal(got, c.env.Value) {
+		return nil, fmt.Errorf("HGET %s: wrong value", key)
+	}
+	return nil, nil
+}
+```
+
+`go run .` (or `run.sh`, which copies every `.go` file) then shows an "HSET + HGET" button after the
+built-in workloads. The API lists it in `GET /api/state` under `workloads`, and
+`curl -X POST localhost:8080/api/config -d '{"workload":"hash"}'` selects it. The scoreboard, the
+finder, the road ceiling and the Redis card use its `Info()`.
+
+The rules:
+
+- **One `Caller` per caller goroutine.** `NewCaller` runs once per caller; the caller's state (a
+  counter, a random source) lives in it, and only its own goroutine calls it.
+- **`Start` sends one request's commands and returns all of them.** The loop waits for them and
+  counts their errors (`redis.Nil` is not an error). Do not wait in `Start` beyond what the face
+  does: on the blocking faces each command already waits for its reply; on the async face `Start`
+  must return at once, or the window stops filling.
+- **Use `env.Key` and `env.Value`.** The `key` argument is a seeded key (`demo:key:N`); `env.Key(i)`
+  gives more of them, and `env.Value` is `ValueSize` bytes. `env.Get(ctx, slot, key)` is a GET that
+  honours the GetToBuffer option when `Info().ZeroCopy` is set.
+- **Follow-ups go in `Finish`.** It runs after the replies, without errors, so a command there can
+  use them (the cache fill's SET is built from the GET's reply). Waiting for its reply (`Err()`)
+  costs another round trip.
+- **Fire-and-forget commands go in `later`.** `Finish` returns them without waiting, and the loop
+  checks their errors one window later, so the request's latency does not include them.
+- **`env.Cmds` has the commands the demo uses.** To call another command, add its method to the
+  `commands` interface in `engines.go`; `*redis.Client` and `*redis.AutoPipeliner` both have every
+  command.
+- **The `Info` fields are for the demo's numbers:** `Commands` per request (the Redis card), `Trips`
+  on the blocking faces (the road ceiling), `Work` for app work per request (the loop sleeps it
+  between `Start` and `Finish`), `ChecksOrder` with `env.OutOfOrder()` for an ordering check. A
+  workload whose info depends on the options implements `InfoFor(cfg config) WorkloadInfo`, as the
+  page does.
+- **Keys of its own: implement `Seeder`.** The demo calls `Seed(ctx, rdb, cfg)` with the load stopped,
+  on a plain client, before the engine starts and again on every option change, so keep it
+  idempotent and cheap when nothing changed (a marker key).
+
+`workload_widerows.go` is a full example with seeding and validation, for issue
+[#4299](https://github.com/redis/go-redis/issues/4299): one `HMGET` of 105 fields per request, every
+reply checked (missing fields stay nil, not ""). At the issue's scale,
+`curl -X POST localhost:8080/api/config -d '{"workload":"widerows","keys":100000,"numShards":4}'`
+seeds in a few seconds and uses about 130 MB of Redis memory (Redis 8.2). Page size maps to "in
+flight per caller" on the async faces (up to x256), connections to full duplex pipes (`numShards`).
+
 ## Files
 
 | File | What it holds |
@@ -351,11 +440,13 @@ For numbers from dedicated machines, see the benchmarks behind the talk.
 | `main.go` | flags, the demo state, the scripted tour |
 | `engines.go` | the five engines, the load generator, the latency histogram |
 | `proxy.go` | the road: a delay proxy that keeps many chunks in flight |
-| `stats.go` | what Redis reports (`CLIENT LIST`, `INFO commandstats`), the RTT probe, process CPU |
+| `stats.go` | what Redis reports (`CLIENT LIST`, `INFO commandstats`), the RTT probe, process CPU, the Go runtime's memory and allocation counters (`runtime/metrics`) |
 | `ui.go` | the terminal UI |
 | `web.go`, `web/index.html` | the browser UI: a JSON snapshot, a server-sent event stream, the page |
 | `control.go` | the actions both UIs use, serialised so a click never interleaves a restart |
-| `config.go` | workloads, value size, keys and engine options, with their limits |
+| `config.go` | the workload choice, value size, keys and engine options, with their limits |
+| `workloads.go` | the `Workload` interface, the registry and the built-in workloads |
+| `workload_widerows.go` | a plug-in workload: wide `HMGET` rows, seeded and validated |
 | `faults.go` | faults, client cores, memory |
 | `otel.go` | go-redis's OpenTelemetry metrics, read in process; the demo's admin and probe clients are labelled (`stats.go`) and left out |
 | `net.go` | the dialer (caps dials in flight, no TIME_WAIT) and the logger that keeps go-redis off the terminal |

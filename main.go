@@ -47,6 +47,11 @@ type metrics struct {
 	heapMB, sysMB    float64       // Go heap in use, and what the runtime holds from the OS
 	ceiling          float64       // the road's limit for this setup (config.ceiling)
 	spares           int           // unnamed idle connections: warm spares (stats.go)
+	// Go runtime, process-wide (rtMeter): per request completed, the GC share of
+	// the CPU, the largest heap since the warm-up ended, and whether the request
+	// rate is too low for the per-request numbers to mean much
+	allocsPerReq, bytesPerReq, gcPct, peakHeapMB float64
+	allocLowRate                                 bool
 }
 
 // srvTick is one tick of what Redis counted and what this process used.
@@ -83,6 +88,8 @@ type demo struct {
 	stats   *serverStats
 	hist    *liveHist
 	cpu     cpuMeter
+	rt      rtMeter // runtime/metrics, read with the histogram so both cover one interval
+	peak    uint64  // the most heap object bytes in a tick since the last warm-up
 	run     *running
 	engine  Engine
 	callers int
@@ -135,7 +142,11 @@ func newDemo(t target) (*demo, error) {
 		return d, nil
 	}
 	d.version = d.stats.version(ctx)
-	if err := d.stats.seed(ctx, d.cfg.Keys, d.cfg.ValueSize); err != nil {
+	err = d.stats.seed(ctx, d.cfg.Keys, d.cfg.ValueSize)
+	if err == nil {
+		err = d.seedWorkload(ctx, d.stats, d.cfg)
+	}
+	if err != nil {
 		d.connErr = fmt.Errorf("seed: %w", err)
 	}
 	return d, nil
@@ -236,7 +247,7 @@ func (d *demo) logErrors(run *running, out metrics) {
 		d.event("ERROR %d new error%s, last: %s", n, plural(int(n)), msg)
 		e.errs, e.at = out.errs, time.Now()
 	}
-	if d.cfg.Workload == WOrder {
+	if d.cfg.workloadInfo().ChecksOrder {
 		if n := out.disorder - e.disorder; n > 0 {
 			d.event("ERROR %d more replies out of order (%d since the engine started)", n, out.disorder)
 			e.disorder, e.at = out.disorder, time.Now()
@@ -257,8 +268,16 @@ func (d *demo) sample(ctx context.Context) metrics {
 	d.mu.Lock()
 	now := time.Now()
 	w := d.hist.snapshot(now.Sub(d.lastAt))
+	var objBytes, inuse, sys uint64
+	w.allocs, objBytes, inuse, sys = d.rt.read()
 	d.lastAt = now
 	warming := now.Before(d.warmTo)
+	if warming {
+		d.peak = 0 // a new run: its peak starts after the warm-up
+	} else {
+		d.peak = max(d.peak, objBytes)
+	}
+	peak := d.peak
 	if !warming {
 		d.ring = append(d.ring, w)
 		if len(d.ring) > 4 {
@@ -277,13 +296,17 @@ func (d *demo) sample(ctx context.Context) metrics {
 	if connErr != nil { // nothing to measure
 		return out
 	}
+	aw := m      // the window the allocation numbers cover, like requests/s
 	if warming { // show this tick alone in the chart, dimmed; the panels keep their last numbers
+		aw = w
 		out.rate, out.p50, out.p99 = w.rate(), w.quantile(0.50), w.quantile(0.99)
 	}
+	out.allocsPerReq, out.bytesPerReq, out.gcPct, out.allocLowRate = aw.allocsPerReq(), aw.bytesPerReq(), aw.allocs.gcPct(), aw.allocLowRate()
+	out.peakHeapMB = float64(peak) / (1 << 20)
 	cmds, cmdSpan := st.commandsDelta(ctx)
 	out.conns, out.spares = st.connCounts(ctx)
 	cpu, wall := d.cpu.delta()
-	out.heapMB, out.sysMB = memory()
+	out.heapMB, out.sysMB = float64(inuse)/(1<<20), float64(sys)/(1<<20)
 	out.measuredRTT = st.measuredRTT(ctx)
 	if run != nil {
 		out.errs = run.errs.Load()
@@ -334,6 +357,7 @@ func (d *demo) sample(ctx context.Context) metrics {
 		*a = merge([]window{*a, w})
 		all := out
 		all.rate, all.p50, all.p99 = a.rate(), a.quantile(0.50), a.quantile(0.99)
+		all.allocsPerReq, all.bytesPerReq, all.gcPct, all.allocLowRate = a.allocsPerReq(), a.bytesPerReq(), a.allocs.gcPct(), a.allocLowRate()
 		all.span = a.span
 		d.board[sc] = all
 	}

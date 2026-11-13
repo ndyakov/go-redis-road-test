@@ -129,10 +129,3 @@ func (d *demo) setCores(n int) {
 	d.warmTo = time.Now().Add(warmUp)
 	d.mu.Unlock()
 }
-
-// memory is the Go heap in use and what the Go runtime holds from the OS, in MB.
-func memory() (heapMB, sysMB float64) {
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-	return float64(m.HeapInuse) / (1 << 20), float64(m.Sys) / (1 << 20)
-}

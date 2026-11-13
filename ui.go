@@ -254,7 +254,7 @@ func draw(d *demo) {
 	add := func(ls ...string) { lines = append(lines, ls...) }
 
 	// header bar
-	wl := string(cfg.Workload)
+	wl := cfg.Workload
 	if cfg.zeroCopy() {
 		wl += " (GetToBuffer)"
 	}
@@ -304,6 +304,7 @@ func draw(d *demo) {
 		pad("p50 / p99", 14) + pad(bold(fmtDur(m.p50)+" / "+fmtDur(m.p99)), 18) + muted("lower better"),
 		pad("connections", 14) + pad(bold(fmt.Sprint(m.conns)), 18) + muted("lower better"),
 		pad("client CPU", 14) + pad(bold(fmt.Sprintf("%.1f cores", m.cores)), 18) + muted("incl. proxy"),
+		pad("allocs/req", 14) + pad(bold(fmt.Sprintf("%.1f", m.allocsPerReq)), 18) + muted(map[bool]string{true: "low rate", false: "lower better"}[m.allocLowRate]),
 	}
 	if m.errs > 0 {
 		now = append(now, fg(cHyper, fmt.Sprintf("errors %d: %s", m.errs, m.lastErr)))
