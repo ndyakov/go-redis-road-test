@@ -63,7 +63,7 @@ type configInfo interface {
 
 // Seeder is an optional Workload method, for a workload that reads its own
 // keys. The demo calls Seed before the engine starts, with the load stopped,
-// on the plain client (not the engine under test). Seed runs again on every
+// on the configured admin client, including TLS (not the engine under test). Seed runs again on every
 // option change, so it must be idempotent and cheap when nothing changed.
 type Seeder interface {
 	Seed(ctx context.Context, rdb *redis.Client, cfg config) error

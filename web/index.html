@@ -648,7 +648,7 @@ function renderConn() {
     connFilled = true;
   }
   const st = $("c-status");
-  if (c.connected) { st.className = "hint ok"; st.textContent = `connected to ${c.host}:${c.port}` + (c.version ? `, Redis ${c.version}` : "") + (c.direct ? ", direct (no road proxy)" : ""); }
+  if (c.connected) { st.className = "hint ok"; st.textContent = `connected to ${c.host}:${c.port} [${c.security}]` + (c.version ? `, Redis ${c.version}` : "") + (c.direct ? ", direct (no road proxy)" : ""); }
   else { st.className = "hint bad"; st.textContent = `not connected: ${c.error}`; }
   const sum = $("conn-sum"); // shown while the drawer is collapsed
   sum.textContent = st.textContent; sum.classList.toggle("err", !c.connected);

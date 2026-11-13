@@ -236,7 +236,8 @@ func draw(d *demo) {
 	eng, callers, win := d.engine, d.callers, d.window
 	cfg := d.cfg
 	tr := d.trouble
-	raddr := d.target.addr
+	raddr := d.target.addr + " [" + d.target.security() + "]"
+	target := d.target
 	rtt := d.rtt
 	hist := append([]tickPoint(nil), d.history...)
 	marks := append([]byte(nil), d.marks...)
@@ -293,7 +294,7 @@ func draw(d *demo) {
 		bold("road    ") + strings.Join(road, " ") + muted("  (r)   ") + "measured " + bold(fmtDur(m.measuredRTT)) + muted("  "+roadNote),
 		bold("engine  ") + strings.Join(es, " ") + muted("  (1-5)"),
 		bold("load    ") + bold(fmt.Sprint(callers)) + map[bool]string{true: " caller ", false: " callers "}[callers == 1] + muted("(+/-)") + "    " + inflight,
-		bold("start   ") + fg(engineColors[eng], strings.ReplaceAll(cfg.code(eng), "\n", "; ")),
+		bold("start   ") + fg(engineColors[eng], strings.ReplaceAll(target.clientCode(cfg, eng), "\n", "; ")),
 	}, W)...)
 
 	// now + scoreboard
@@ -380,7 +381,7 @@ func draw(d *demo) {
 		nowTitle = "last 2 s  (warming up)"
 	}
 	add(side(box(nowTitle, now, leftW),
-		box(fmt.Sprintf("scoreboard +%s, %d callers   ▲ most req/s  ● lowest p99   (x)", rtt, callers), sb, rightW), leftW)...)
+		box(fmt.Sprintf("scoreboard +%s, %d callers, %s   ▲ most req/s  ● lowest p99   (x)", rtt, callers, target.security()), sb, rightW), leftW)...)
 
 	// charts: what is left of the height, 60% throughput, 40% latency
 	room := H - len(lines) - 2 - 6 // footer, and borders + axis lines of two boxes

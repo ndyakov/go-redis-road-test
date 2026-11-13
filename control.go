@@ -159,9 +159,12 @@ func (d *demo) connect(host string, port int, user, pass string) error {
 	if host == "" || port < 1 || port > 65535 {
 		return fmt.Errorf("host and a port from 1 to 65535, please")
 	}
-	t := target{addr: net.JoinHostPort(host, strconv.Itoa(port)), user: user, pass: pass}
 	ctl.Lock()
 	defer ctl.Unlock()
+	d.mu.Lock()
+	policy := d.target.tls
+	d.mu.Unlock()
+	t := target{addr: net.JoinHostPort(host, strconv.Itoa(port)), user: user, pass: pass, tls: policy}
 	st := newServerStats(t, d.proxy.Addr())
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
