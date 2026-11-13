@@ -106,6 +106,44 @@ go run . --addr 127.0.0.1:16421
 For large values, run Redis natively instead (see below): Docker Desktop's port forwarding limits
 bandwidth.
 
+### Verified TLS
+
+TLS is opt-in, so existing plain TCP demos continue to work:
+
+```sh
+# Password stays in REDIS_PASSWORD; the CA file is public trust material.
+go run . --addr redis.example:12000 --tls --tls-ca /private/redis-ca.pem --web 127.0.0.1:8080
+# Omit --tls-ca for the system trust store. Optional certificate name override:
+go run . --addr 127.0.0.1:12000 --tls --tls-ca /private/redis-ca.pem --tls-server-name redis.example --direct
+```
+
+`--tls` enforces certificate chain and hostname verification, with TLS 1.2 or
+newer. `--tls-ca` adds PEM roots to the system trust store. `--tls-server-name`
+changes certificate hostname verification and SNI; otherwise both use the real
+Redis target hostname, including when dialing the local road proxy. CA/name
+flags require `--tls`; there is no insecure verification bypass.
+
+Every Redis client follows the policy: all five engines, workload seeders,
+admin/statistics and RTT probes. Custom dialers explicitly perform one verified
+handshake because go-redis does not add TLS around a supplied Dialer. Monitoring
+labels wrap an already secure connection. The proxy forwards encrypted bytes
+without terminating TLS. The dial timeout and caller context bound both TCP and
+TLS establishment; failed handshakes close the socket.
+
+The browser's Connect action retains the startup TLS policy. A new hostname is
+verified automatically unless an explicit server-name override was configured;
+changing to a plaintext endpoint cannot silently disable TLS. Restart the process
+to change CA/name/TLS policy. CLI output, terminal/browser connection labels,
+client option sketches and JSON scoreboard/finder rows identify the transport.
+RESP3 remains the default; the engine's existing RESP2 experiment remains explicit.
+TLS handshake/record CPU and encrypted proxy traffic are part of TLS-run costs;
+keep historical plain TCP measurements labeled separately.
+
+Run local certificate/transport tests with `go test -race ./...`. They use local
+TLS echo fixtures and no Redis server. The opt-in Software smoke test requires
+an explicitly verified owned Redis Software fixture; see its environment contract
+in `tls_software_test.go`. No benchmark or server deployment is started by tests.
+
 ## Any go-redis version
 
 `go.mod` pins v9.23.0. To try another go-redis without editing it, use `run.sh`: it builds the demo
@@ -423,7 +461,7 @@ The rules:
   workload whose info depends on the options implements `InfoFor(cfg config) WorkloadInfo`, as the
   page does.
 - **Keys of its own: implement `Seeder`.** The demo calls `Seed(ctx, rdb, cfg)` with the load stopped,
-  on a plain client, before the engine starts and again on every option change, so keep it
+  on the configured admin client (including TLS), before the engine starts and again on every option change, so keep it
   idempotent and cheap when nothing changed (a marker key).
 
 `workload_widerows.go` is a full example with seeding and validation, for issue

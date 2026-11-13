@@ -390,10 +390,18 @@ func main() {
 	web := flag.String("web", "", "serve the browser UI on this address, e.g. 127.0.0.1:8080")
 	rttcheck := flag.Bool("rttcheck", false, "measure where the round trip goes: timer, Docker, the road, CPU under load")
 	leakcheck := flag.Bool("leakcheck", false, "start the pool, stop it while it is still dialing, count leftover connections")
+	tlsEnabled := flag.Bool("tls", false, "verify TLS for every Redis connection, directly or through the road")
+	tlsCA := flag.String("tls-ca", "", "additional PEM CA file (requires --tls)")
+	tlsName := flag.String("tls-server-name", "", "certificate DNS name override; default is the Redis target host (requires --tls)")
 	flag.Parse()
+	policy, policyErr := loadTLS(*tlsEnabled, *tlsCA, *tlsName)
+	if policyErr != nil {
+		fmt.Fprintln(os.Stderr, "engines:", policyErr)
+		os.Exit(1)
+	}
 
 	// the password only from the environment: a flag would show in ps
-	d, err := newDemo(target{addr: *addr, user: *user, pass: os.Getenv("REDIS_PASSWORD")})
+	d, err := newDemo(target{addr: *addr, user: *user, pass: os.Getenv("REDIS_PASSWORD"), tls: policy})
 	if err == nil {
 		d.direct = *direct
 		redis.SetLogger(&demoLogger{d: d})
@@ -406,6 +414,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer d.close()
+	fmt.Printf("Redis transport: %s (RESP3 default; see engine options for override)\n", d.target.security())
 	if *sweep {
 		err = runSweep(d)
 	} else if *web != "" {

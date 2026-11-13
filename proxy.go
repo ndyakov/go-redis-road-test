@@ -9,7 +9,9 @@ import (
 )
 
 // roadProxy sits between the demo clients and Redis and adds a round trip: each
-// direction holds every chunk for RTT/2. It stamps a chunk when it is read and
+// With TLS the road forwards encrypted bytes unchanged; clients authenticate
+// the Redis target end to end. The upstream TCP socket is not a Redis client.
+// Each direction holds every chunk for RTT/2. It stamps a chunk when it is read and
 // releases it at stamp+delay, so many chunks are on the road at once. A proxy
 // that waited per chunk before reading the next would serialize the traffic
 // itself and hide the difference between the engines.

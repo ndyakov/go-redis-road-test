@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"net"
 	rtm "runtime/metrics"
 	"sort"
@@ -27,6 +28,7 @@ type serverStats struct {
 // target is the Redis the demo talks to.
 type target struct {
 	addr, user, pass string
+	tls              *tls.Config // immutable startup policy; ServerName is only an explicit override
 }
 
 func newServerStats(t target, proxyAddr string) *serverStats {
@@ -35,11 +37,10 @@ func newServerStats(t target, proxyAddr string) *serverStats {
 	// metrics take server.address from there and the pool name from Addr, so
 	// otel.go can leave these two clients out of the engine's numbers.
 	opt := func(addr, name string, size int) *redis.Options {
-		var d net.Dialer
-		return &redis.Options{Addr: name + ":0", Username: t.user, Password: t.pass, ClientName: name, PoolSize: size,
+		return &redis.Options{Addr: name + ":0", Username: t.user, Password: t.pass, ClientName: name, PoolSize: size, Protocol: 3, TLSConfig: t.tls,
 			DialTimeout: 3 * time.Second, DialerRetries: 1,
 			Dialer: func(ctx context.Context, network, _ string) (net.Conn, error) {
-				c, err := d.DialContext(ctx, network, addr)
+				c, err := t.dialer(3*time.Second)(ctx, network, addr)
 				if err != nil {
 					return nil, err
 				}

@@ -11,9 +11,8 @@ import (
 )
 
 // Step 1: a pool. Each call takes a connection, sends one command, waits.
-func usePool(ctx context.Context) (string, error) {
-	rdb := redis.NewClient(&redis.Options{PoolSize: 500})
-	defer rdb.Close()
+func usePool(ctx context.Context, rdb *redis.Client) (string, error) {
+	// Use the same configured (possibly TLS) client as all other examples.
 	return rdb.Get(ctx, "user:42").Result()
 }
 
