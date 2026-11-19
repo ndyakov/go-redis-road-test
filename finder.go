@@ -64,6 +64,7 @@ func findCandidates(async bool) []findCand {
 }
 
 type findResult struct {
+	Security string  `json:"security"`
 	Label    string  `json:"label"`
 	Engine   int     `json:"engine"`
 	Rate     float64 `json:"rate"`
@@ -260,7 +261,7 @@ func (d *demo) measureFind(ctx context.Context, c findCand) (findResult, bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	b := d.board[sc]
-	r := findResult{Label: c.label, Engine: int(c.engine), Rate: b.rate, P50ms: ms(b.p50), P99ms: ms(b.p99),
+	r := findResult{Security: d.target.security(), Label: c.label, Engine: int(c.engine), Rate: b.rate, P50ms: ms(b.p50), P99ms: ms(b.p99),
 		AllocsPerReq: b.allocsPerReq, BytesPerReq: b.bytesPerReq, AllocLowRate: b.allocLowRate,
 		Conns: d.last.conns, Errs: d.last.errs, KeptUp: true}
 	if d.cfg.workloadInfo().ChecksOrder {

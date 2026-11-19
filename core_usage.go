@@ -1,8 +1,14 @@
 package main
 
 // The one-line start of each engine, the same lines as on the talk slides.
-// The demo calls the same functions in startEngine (engines.go); this file
-// keeps them in one place to read.
+// startEngine (engines.go) uses the same API calls; these standalone examples
+// keep them in one place to read. Each accepts a client configured by the caller
+// for the Redis address, credentials and optional TLS. Create it once and reuse
+// it across requests; the caller closes it when finished:
+//
+//	rdb := redis.NewClient(&redis.Options{Addr: "localhost:6379", PoolSize: 500})
+//	defer rdb.Close()
+//	value, err := usePool(ctx, rdb)
 
 import (
 	"context"
@@ -11,9 +17,7 @@ import (
 )
 
 // Step 1: a pool. Each call takes a connection, sends one command, waits.
-func usePool(ctx context.Context) (string, error) {
-	rdb := redis.NewClient(&redis.Options{PoolSize: 500})
-	defer rdb.Close()
+func usePool(ctx context.Context, rdb *redis.Client) (string, error) {
 	return rdb.Get(ctx, "user:42").Result()
 }
 

@@ -171,7 +171,6 @@ func (c config) optsLabel(e Engine) string {
 	return strings.Join(parts, ", ")
 }
 
-// code is the Go that builds this engine with these options: the line on screen.
 // clientCode is the redis.Options fields every engine shares, when set.
 func (c config) clientCode() []string {
 	var o []string
@@ -196,9 +195,11 @@ func (c config) clientCode() []string {
 	return o
 }
 
-func (c config) code(e Engine) string {
+// code builds the on-screen engine sketch, including any transport fields in
+// the same redis.Options literal as the configured client options.
+func (c config) code(e Engine, transportFields []string) string {
 	fd := e == FullDuplex || e == FullDuplexAsync
-	client := c.clientCode()
+	client := append(c.clientCode(), transportFields...)
 	if e == Pool {
 		client = append([]string{fmt.Sprintf("PoolSize: %d", c.PoolSize)}, client...)
 		if c.MinIdleConns > 0 {

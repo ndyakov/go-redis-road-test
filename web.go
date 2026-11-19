@@ -63,6 +63,7 @@ type point struct {
 }
 
 type boardRow struct {
+	Security  string  `json:"security"`
 	Engine    int     `json:"engine"`
 	Name      string  `json:"name"`
 	Rate      float64 `json:"rate"`
@@ -99,6 +100,7 @@ type connInfo struct {
 	Error     string `json:"error"`
 	Version   string `json:"version"`
 	Direct    bool   `json:"direct"`
+	Security  string `json:"security"`
 }
 
 type snapshot struct {
@@ -150,7 +152,7 @@ func (d *demo) snapshot() snapshot {
 		History: []point{}, Board: []boardRow{}, Events: []string{},
 	}
 	for e := Engine(0); e < numEngines; e++ {
-		s.Engines = append(s.Engines, engineInfo{Name: e.String(), Code: d.cfg.code(e), Color: hex(engineColors[e]), Async: e.Async()})
+		s.Engines = append(s.Engines, engineInfo{Name: e.String(), Code: d.target.clientCode(d.cfg, e), Color: hex(engineColors[e]), Async: e.Async()})
 	}
 	for _, r := range rttSteps {
 		s.RTTSteps = append(s.RTTSteps, ms(r))
@@ -185,7 +187,7 @@ func (d *demo) snapshot() snapshot {
 		case d.cfg.workloadInfo().ChecksOrder && m.disorder > 0:
 			failed = "out of order"
 		}
-		s.Board = append(s.Board, boardRow{Engine: int(sc.engine), Name: name, Rate: m.rate, P99ms: ms(m.p99), Conns: m.conns,
+		s.Board = append(s.Board, boardRow{Security: d.target.security(), Engine: int(sc.engine), Name: name, Rate: m.rate, P99ms: ms(m.p99), Conns: m.conns,
 			RunS: m.span.Seconds(), AllocsPerReq: m.allocsPerReq, AllocLowRate: m.allocLowRate, Failed: failed})
 		if failed != "" {
 			continue // a failing scenario cannot be the best
@@ -401,7 +403,7 @@ func runWeb(d *demo, addr string) error {
 func (d *demo) connInfo() connInfo {
 	host, port, _ := net.SplitHostPort(d.target.addr)
 	p, _ := strconv.Atoi(port)
-	c := connInfo{Host: host, Port: p, User: d.target.user, Connected: d.connErr == nil, Version: d.version, Direct: d.direct}
+	c := connInfo{Host: host, Port: p, User: d.target.user, Connected: d.connErr == nil, Version: d.version, Direct: d.direct, Security: d.target.security()}
 	if d.connErr != nil {
 		c.Error = d.connErr.Error()
 	}

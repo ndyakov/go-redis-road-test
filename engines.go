@@ -80,12 +80,13 @@ type running struct {
 	lastErr  atomic.Value // string
 }
 
-func startEngine(addr string, auth target, e Engine, callers, window int, cfg config, hist *liveHist) (*running, error) {
+func engineOptions(addr string, auth target, e Engine, cfg config) *redis.Options {
 	opt := &redis.Options{
 		Addr:         addr,
 		Username:     auth.user,
 		Password:     auth.pass,
-		Dialer:       demoDialer, // caps dials in flight, no TIME_WAIT (net.go)
+		TLSConfig:    auth.tls,                      // also identifies TLS to go-redis maintenance endpoint selection
+		Dialer:       auth.dialer(10 * time.Second), // TCP + verified TLS, including through the road
 		ClientName:   clientName,
 		Protocol:     3,
 		PoolSize:     cfg.PoolSize,
@@ -125,7 +126,11 @@ func startEngine(addr string, auth target, e Engine, callers, window int, cfg co
 	}
 	opt.ConnMaxLifetime = time.Duration(cfg.ConnLifetimeMs) * time.Millisecond
 	opt.DisableIdentity = cfg.DisableIdentity
-	rdb := redis.NewClient(opt)
+	return opt
+}
+
+func startEngine(addr string, auth target, e Engine, callers, window int, cfg config, hist *liveHist) (*running, error) {
+	rdb := redis.NewClient(engineOptions(addr, auth, e, cfg))
 	w := cfg.workload()
 	r := &running{
 		engine: e, cfg: cfg, rdb: rdb, hist: hist, value: make([]byte, cfg.ValueSize),
